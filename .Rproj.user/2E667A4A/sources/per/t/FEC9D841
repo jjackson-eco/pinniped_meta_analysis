@@ -1,0 +1,26 @@
+{
+    "id": "FEC9D841",
+    "path": "~/Dropbox/Collaborators_shared/MCEM_Katrina_Davis/Pinniped_Review/Code/pinniped_meta_analysis/wrangling/gfw_wrangling.R",
+    "project_path": "wrangling/gfw_wrangling.R",
+    "type": "r_source",
+    "hash": "1876895110",
+    "contents": "",
+    "dirty": false,
+    "created": 1665673811217.0,
+    "source_on_save": false,
+    "relative_order": 3,
+    "properties": {
+        "source_window_id": "",
+        "Source": "Source",
+        "cursorPosition": "37,51",
+        "scrollLine": "0"
+    },
+    "folds": "",
+    "lastKnownWriteTime": 1658754207,
+    "encoding": "UTF-8",
+    "collab_server": "",
+    "source_window": "",
+    "last_content_update": 1658754207,
+    "read_only": false,
+    "read_only_alternatives": []
+}

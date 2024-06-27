@@ -1,0 +1,106 @@
+#####################################################
+##                                                 ##
+##   Pinniped Fisheries Interaction Meta-Analysis  ##
+##                                                 ##
+##        Spatial raster layer preparation         ##
+##                                                 ##
+##               JJ- Jun 20th 2023                 ##
+##                                                 ##
+#####################################################
+rm(list = ls())
+options(width = 100)
+memory.limit(size = 60000) ## Increase memory limit to allocate bigger vectors for the rasters
+
+library(raster)
+library(rasterize)
+library(tidyverse)
+library(patchwork)
+library(MetBrewer)
+library(sf)
+
+## need high computation power for large(ish) raster files
+
+##______________________________________________________________________________
+#### 1. Loading raw data ####
+
+## A) Global Fishing data- I am not hosting data publicly, but available from https://globalfishingwatch.org/ 
+GFW_raster_0.5 <- readRDS("../../Data/GFW_raster_0.5.RData")
+
+## B) Distance to shore - I am not hosting data publicly, but available from https://oceancolor.gsfc.nasa.gov/resources/docs/distfromcoast/
+coast_dist_raw <- raster("../../../Coastal_data/GMT_intermediate_coast_distance_01d.tif")
+
+## C) Pinniped data
+load("../../Data/pinniped_sf_dat.RData")
+
+##______________________________________________________________________________
+#### 2. Wrangling ####
+
+## A) GFW - log10 scale and normalise (0-1, 1 = highest effort)
+GFW_raster_norm <- log10(GFW_raster_0.5 + 1)/maxValue(log10(GFW_raster_0.5 + 1))
+GFW_raster_norm[is.na(GFW_raster_norm) == TRUE] <- 0 # setting NA to 0 - essentially means there wasn't recording/fishing
+
+## B) Distance to shore - convert to 0.5 grid, only marine and normalise (0-1, 1 = closest)
+summary(coast_dist_raw)
+
+coast_dist_0.5 <- aggregate(coast_dist_raw, fact = 50)
+res(coast_dist_0.5)
+
+coast_dist_0.5[coast_dist_0.5 < 0] <- NA
+coast_proximity <- 1 - (log10(coast_dist_0.5 + 1)/maxValue(log10(coast_dist_0.5 + 1)))
+
+## C) Pinniped data - project on to 0.5 x 0.5 rasterhttp://127.0.0.1:18305/graphics/plot_zoom_png?width=1200&height=900
+
+# The 0.5 grid to project on to
+world_raster <- raster(xmn = -180, xmx = 180,
+                       ymn = -90, ymx = 90,
+                       resolution = c(0.5,0.5))
+
+pinniped_lc_sf$dat <- 1
+pinn_raster <- rasterize(pinniped_lc_sf, world_raster, "dat")
+pinn_raster[is.na(pinn_raster) == TRUE] <- 0.01 # setting non points to a 1% chance of being spotted
+
+pinniped_sf_dat$dat <- 1
+pinn_all_raster <- rasterize(pinniped_sf_dat, world_raster, "dat")
+pinn_all_raster[is.na(pinn_all_raster) == TRUE] <- 0.01 # setting non points to a 1% chance of being spotted
+
+##______________________________________________________________________________
+#### 3. Saving underlying rasters ####
+
+writeRaster(x = coast_proximity, 
+            filename = "../../Figures/spatial_raster_data/coast_proximity.tif")
+
+writeRaster(x = GFW_raster_norm, 
+            filename = "../../Figures/spatial_raster_data/GFW_raster_norm.tif")
+
+writeRaster(x = pinn_raster, 
+            filename = "../../Figures/spatial_raster_data/pinn_raster.tif")
+
+writeRaster(x = pinn_all_raster, 
+            filename = "../../Figures/spatial_raster_data/pinn_all_raster.tif")
+
+##______________________________________________________________________________
+#### 4. Creating and saving index rasters ####
+
+potential_pinniped_conflict <- 
+  GFW_raster_norm * coast_proximity * pinn_raster
+
+writeRaster(x = potential_pinniped_conflict, 
+            filename = "../../Figures/spatial_raster_data/potential_pinniped_conflict.tif")
+
+potential_pinniped_conflict_noshore <- 
+  GFW_raster_norm * pinn_raster
+
+writeRaster(x = potential_pinniped_conflict_noshore, 
+            filename = "../../Figures/spatial_raster_data/potential_pinniped_conflict_noshore.tif")
+
+potential_pinniped_conflict_nogfw <- 
+  pinn_raster * coast_proximity
+
+writeRaster(x = potential_pinniped_conflict_nogfw, 
+            filename = "../../Figures/spatial_raster_data/potential_pinniped_conflict_nogfw.tif")
+
+potential_pinniped_conflict_allpin <- 
+  GFW_raster_norm * coast_proximity * pinn_all_raster
+
+writeRaster(x = potential_pinniped_conflict_allpin, 
+            filename = "../../Figures/spatial_raster_data/potential_pinniped_conflict_allpin.tif")

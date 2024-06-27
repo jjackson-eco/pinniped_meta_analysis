@@ -1,0 +1,198 @@
+#####################################################
+##                                                 ##
+##   Pinniped Fisheries Interaction Meta-Analysis  ##
+##                                                 ##
+##              Conflict potential                 ##
+##                                                 ##
+##               JJ- Jul 25th 2022                 ##
+##                                                 ##
+#####################################################
+rm(list = ls())
+options(width = 100)
+memory.limit(size = 60000) ## Increase memory limit to allocate bigger vectors for the rasters
+
+library(raster)
+library(rasterize)
+library(tidyverse)
+library(patchwork)
+library(MetBrewer)
+library(sf)
+library(sp)
+
+##______________________________________________________________________________
+#### 1. Loading data ####
+
+## A) Global Fishing data
+GFW_raster_0.5 <- readRDS("../../Data/GFW_raster_0.5.RData")
+
+## B) Distance to shore
+load("../../Data/coast_dist_0.5.RData")
+
+## C) 'Pinniped data'
+load("../../Data/pinniped_sf_dat.RData")
+
+##______________________________________________________________________________
+#### 2. Wrangling ####
+
+## A) GFW - log10 scale and normalise (0-1, 1 = highest effort)
+GFW_raster_norm <- log10(GFW_raster_0.5 + 1)/maxValue(log10(GFW_raster_0.5 + 1))
+
+## B) Distance to shore - only marine and normalise (0-1, 1 = closest)
+coast_dist_0.5[coast_dist_0.5 < 0] <- NA
+coast_proximity <- 1 - (log10(coast_dist_0.5 + 1)/maxValue(log10(coast_dist_0.5 + 1)))
+
+## C) Pinniped data - project on to 0.5 x 0.5 raster
+
+# The 0.5 grid to project on to
+world_raster <- raster(xmn = -180, xmx = 180,
+                       ymn = -90, ymx = 90,
+                       resolution = c(0.5,0.5))
+pinniped_lc_sf$dat <- 1
+pinn_raster <- rasterize(pinniped_lc_sf, world_raster, "dat")
+
+##______________________________________________________________________________
+#### 3. Creating a combined raster ####
+
+potential_pinniped_conflict <- 
+  GFW_raster_norm * coast_proximity * pinn_raster
+
+potential_pinniped_conflict_noshore <- 
+  GFW_raster_norm * pinn_raster
+
+##______________________________________________________________________________
+#### 4. Linking to operational interaction data ####
+
+# my crs
+myCRS <- CRS("+proj=robin +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs")
+crs(potential_pinniped_conflict) <- myCRS
+
+## Load data
+load("../../Data/pinnrev_sf.RData")
+load("../../Data/op_interaction.RData")
+load("../../Data/")
+
+# spatial object formally
+pinnrev_sp <- as(pinnrev_sf, "Spatial")
+crs(pinnrev_sp) <- myCRS
+
+## extract raster values for the study geometries
+pinnrev_mnconf <- pinnrev_sf %>% 
+  mutate(potential_conflict = raster::extract(potential_pinniped_conflict,
+                     pinnrev_sp, fun = mean, df = TRUE, na.rm = TRUE)[,2]) %>% 
+  dplyr::select(acc_no, potential_conflict) %>% 
+  as_tibble()
+
+## Adding to operational interaction data
+op_interaction <- op_interaction %>% 
+  left_join(x = ., y = pinnrev_mnconf, by = "acc_no")
+
+# Taking centroid points for plot - having to add 16:18 and 21 separately
+pinnrev_centroids <- st_centroid(pinnrev_sf[-c(16:18,21),]) %>% 
+  mutate(n = if_else(is.na(n_int) == TRUE, as.numeric(n_dmg), n_int))
+
+##______________________________________________________________________________
+#### 5. Creating nice plots ####
+
+# overall world map
+world_map <- st_read("../../Figures/Natural_Earth_Land_data/ne_10m_land.shp")
+
+## GFW
+crs(GFW_raster_norm) <- myCRS
+GFW_raster_norm_spdf <- as(GFW_raster_norm, "SpatialPixelsDataFrame")
+GFW_raster_norm_df <- as.data.frame(GFW_raster_norm_spdf)
+
+GFW_plot <- ggplot() +
+  geom_sf(data = world_map, fill = "lightgrey", colour = "lightgrey", size = 0.01) +
+  geom_tile(data = GFW_raster_norm_df, aes(x = x, y = y, fill = layer)) +
+  scale_fill_viridis_c() +
+  guides(fill = guide_colorbar(barheight = 10, barwidth = 2)) +
+  labs(fill = "Fishing effort") +
+  theme_void()
+
+ggsave(GFW_plot, filename = "../../Figures/extraction_20220512/GFW_index.jpeg",
+       width = 25, height = 19, units = "cm", dpi = 1000)
+
+## Distance to shore
+crs(coast_proximity) <- myCRS
+coast_proximity_spdf <- as(coast_proximity, "SpatialPixelsDataFrame")
+coast_proximity_df <- as.data.frame(coast_proximity_spdf)
+
+coast_proximity_plot <- ggplot() +
+  geom_sf(data = world_map, fill = "lightgrey", colour = "lightgrey", size = 0.01) +
+  geom_tile(data = coast_proximity_df, aes(x = x, y = y, fill = layer)) +
+  scale_fill_viridis_c() +
+  guides(fill = guide_colorbar(barheight = 10, barwidth = 2)) +
+  labs(fill = "Proximity\nto coast") +
+  theme_void()
+
+ggsave(coast_proximity_plot, filename = "../../Figures/extraction_20220512/coast_proximity_index.jpeg",
+       width = 25, height = 19, units = "cm", dpi = 1000)
+
+## Non-threatened pinniped presence
+crs(pinn_raster) <- myCRS
+pinn_raster_spdf <- as(pinn_raster, "SpatialPixelsDataFrame")
+pinn_raster_df <- as.data.frame(pinn_raster_spdf)
+
+pinn_raster_plot <- ggplot() +
+  geom_sf(data = world_map, fill = "lightgrey", colour = "lightgrey", size = 0.01) +
+  geom_tile(data = pinn_raster_df, aes(x = x, y = y, fill = layer),
+            show.legend = F) +
+  scale_fill_viridis_c() +
+  theme_void()
+
+ggsave(pinn_raster_plot, filename = "../../Figures/extraction_20220512/LC_pinniped_map.jpeg",
+       width = 25, height = 19, units = "cm", dpi = 1000)
+
+## Pinniped conflict potential
+crs(potential_pinniped_conflict) <- myCRS
+potential_pinniped_conflict_spdf <- as(potential_pinniped_conflict, "SpatialPixelsDataFrame")
+potential_pinniped_conflict_df <- as.data.frame(potential_pinniped_conflict_spdf)
+
+potential_pinniped_conflict_plot <- ggplot() +
+  geom_sf(data = world_map, fill = "lightgrey", colour = "lightgrey", size = 0.01) +
+  geom_tile(data = potential_pinniped_conflict_df, aes(x = x, y = y, fill = layer)) +
+  scale_fill_viridis_c() +
+  guides(fill = guide_colorbar(barheight = 10, barwidth = 2)) +
+  labs(fill = "Potential\npinniped\nconflict") +
+  theme_void()
+
+ggsave(potential_pinniped_conflict_plot, 
+       filename = "../../Figures/extraction_20220512/pinniped_conflict_index.jpeg",
+       width = 25, height = 19, units = "cm", dpi = 1000)
+
+## With studies
+pinniped_conflict_studies <- ggplot() +
+  geom_sf(data = world_map, fill = "lightgrey", colour = "lightgrey", size = 0.01) +
+  geom_tile(data = potential_pinniped_conflict_df, aes(x = x, y = y, fill = layer)) +
+  geom_sf(data = pinnrev_centroids, colour = viridis::viridis(10)[9], size = 2) + 
+  scale_fill_gradient(low = "white", high = viridis::viridis(10)[4]) +
+  guides(fill = guide_colorbar(barheight = 10, barwidth = 2)) +
+  labs(fill = "Potential\npinniped\nconflict") +
+  theme_void()
+
+int_colour <- MetPalettes$Hokusai2[[1]][3]
+dmg_colour <- MetPalettes$Hokusai2[[1]][6]
+
+int_pc <- ggplot(op_interaction, aes(x = potential_conflict, y = interaction_prop)) +
+  geom_point(colour = int_colour, size = 4, alpha = 0.7) +
+  labs(x = "Potential for pinniped conflict", 
+       y = "Proportion of days with interactions") +
+  theme_bw(base_size = 13) +
+  theme(panel.grid = element_blank())
+  
+dmg_pc <- ggplot(op_interaction, aes(x = potential_conflict, y = damage_prop)) +
+  geom_point(colour = dmg_colour, size = 4, alpha = 0.7) +
+  labs(x = "Potential for pinniped conflict", 
+       y = "Proportion of catch lost") +
+  theme_bw(base_size = 13) +
+  theme(panel.grid = element_blank())
+
+
+ggsave(pinniped_conflict_studies,
+       filename = "../../Figures/extraction_20220512/pinniped_conflict_studies.jpeg",
+       width = 25, height = 19, units = "cm", dpi = 1000)
+
+
+ggsave(int_pc + dmg_pc,
+       filename = "../../Figures/extraction_20220512/pinniped_conflict_op.jpeg",
+       width = 24, height = 10, units = "cm", dpi = 1000)

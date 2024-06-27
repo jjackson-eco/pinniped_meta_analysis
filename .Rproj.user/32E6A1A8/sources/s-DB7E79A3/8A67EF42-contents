@@ -1,0 +1,4341 @@
+## First run the script titled '1) Null Model Object Creation.R'
+## 
+## This code is to analyse the San Jose social network gathered by W. Arlidge
+## and B. Ibanez-Erquiaga
+##
+## Code and plots used for manuscript: Arlidge et al., (submitted) Fishers 
+## attitudes towards conservation interventions influence network centrality. 
+##
+## ================== PREPARE R WORKING ENVIRONMENT ========================
+
+## Clear R's brain
+rm(list=ls())
+
+## Set working drive 
+setwd("~/Dropbox/Research/2020:2021/Projects active/Arlidge et al. SNA2/Stats/Outputs")
+
+## Double check it's set correctly
+getwd()
+
+## ========================= LOAD LIBRARIES ================================
+library(igraph);
+library(spatstat);
+# library(maptools);
+library(rgdal);
+# library(ecodist);
+library(plotrix);
+library(lme4);
+library(nlme);
+library(lmerTest);
+library(car);
+library(MCMCglmm);
+library(FactoMineR);
+library(clue); #solve_LSAP
+library(fields); #rdist
+library(modEvA);
+library(binovisualfields);
+library(ggplot2);
+library(ggpubr); #add significance value to ggplot figures
+library(ggsignif); #add bars, connecting compared groups in figures
+library(sandwich);
+library(infer);
+library(foreign);
+library(MASS);
+library(Hmisc);
+library(vcd);
+library(countreg);
+library(coenocliner);
+library(cowplot);
+library(ggthemes);
+library(lmtest);
+library(tidyverse);
+library(pscl);
+library(parameters);
+library(see);
+library(patchwork)
+
+## these are forcing R to shut down and restart?
+library(sf)
+library(sp)
+library(spData)
+library(spdep)
+
+## Have a go at loading the raw data from the SNA1 analysis
+a<-load(file="~/Dropbox/Research/2020:2021/Projects active/Arlidge et al. SNA2/Stats/Objects/Raw Data Objects.RData")
+
+
+## ========================== LOAD FUNCTIONS ================================
+
+## Most of the functions that I need are in the R object just loaded. 
+
+## ========================== LOAD DATASETS ================================
+
+## Begin by loading the full data set. This contains dyadic data, as well as
+## individual level information. Note that all the column titles and key 
+## information needs to match the information contained in the loaded 
+## R object from the previous study for this code to run properly. 
+
+dat<-read.csv("~/Dropbox/Research/2020:2021/Projects active/Arlidge et al. SNA2/Stats/Datasets/sj_sna_4_10_18.csv",colClasses="character") #load in the full dataset. This contains dyadic data, as well as individual level info
+
+## Then load in the associated key. This contains explanation of the columns
+key<-read.csv("~/Dropbox/Research/2020:2021/Projects active/Arlidge et al. SNA2/Stats/Datasets/SNA_coding_key_4_10_18.csv",colClasses="character") #load in the key. This contains explanation of the columns
+
+## ========================== WRANGLE DATA =================================
+
+## Here we are just tidying up a couple of minor syntax errors from the raw.
+## I introduced an error by tidying up these errors in the raw as the column
+## titles didn't match the loaded R object. 
+key$column.name[key$column.name%in%"primary_net_water_column_position"] <-
+  "net_position_in_water"
+
+colnames(dat)[colnames(dat)%in% "nominee_tech2logy_maintenance"]<-
+  "nominee_technology_maintenance"
+
+## Now do a bit more tidying of the data and see how it looks
+dat<-dat[!(dat$respondent==dat$nominee),]
+dat<-dat[!(dat$nominee %in% ""),]
+dat<-dat[order(dat$respondent,dat$nominee),]
+dat$resp.nom<-paste(dat$respondent,dat$nominee,sep="_")
+dat<-unique(dat)
+head(key)
+head(dat)
+
+# Next create an 'inds' dataset
+resp.names<-dat$respondent
+noms.names<-dat$nominee
+all.names<-sort(unique(c(resp.names,noms.names)))
+inds<-data.frame(name=all.names,id=1:length(all.names),id.c=as.character(1:length(all.names)))
+inds$resp<-inds$name %in% resp.names #whether they are a respondent
+inds$noms<-inds$name %in% noms.names #whether they are nominated
+dat$resp.id<-inds$id[match(resp.names,inds$name)]
+dat$noms.id<-inds$id[match(noms.names,inds$name)]
+dat$resp.id.c<-as.character(dat$resp.id)
+dat$noms.id.c<-as.character(dat$noms.id)
+
+# You can go through this adding loads of stuff for the respondents (i.e. all the skippers)
+# So far, the only col which isn't called 'nominee' and isnt about the respondent is 'information score'. So we can take these out and bind rest of info
+resp.cols<-key$column.name[!(grepl("nominee",key$column.name) | key$column.name%in%"information_score")] #finds name of cols about respondents
+resp.cols[!resp.cols %in% colnames(dat)]
+dat.resp.info<-unique(dat[,c("respondent",resp.cols)])
+# dat.resp.info<-unique(dat[,c("prodelphinus_cooperative_member",resp.cols)])
+
+# Now bind this onto the individual data
+inds<-cbind(inds,dat.resp.info[match(inds$name,dat.resp.info$respondent),])
+
+# And then also bind it onto the dyadic data in terms of whether the respondent answered this or not too
+dat.noms.info<-dat.resp.info
+colnames(dat.noms.info)<-paste("nominee",colnames(dat.noms.info),sep="_")
+dat<-cbind(dat,dat.noms.info[match(dat$nominee,dat.noms.info$nominee_respondent),])
+
+# First question - to what extent do the different types of network predict each other?
+# could look into SNE for building networks of clusters from these different categories - but stick with the below for now
+#1a) does the type of info they share relate to each other
+# make matrix of all against all:
+am.a.blank<-matrix(0,nrow(inds),nrow(inds),dimnames=list(inds$id.c,inds$id.c)) #am.a is going to be all individuals
+am.a.any<-am.a.blank #if they were simply named as a nominee or not (directed matrix)
+am.a.any[cbind(dat$noms.id.c,dat$resp.id.c)]<-1 # shouldnt need cbind to keep cols as character
+
+# Now do for each info type:
+info.types<-unlist(strsplit("nominee_gear_type, nominee_weather, nominee_fish_location, nominee_fishing_activity, nominee_bycatch_turtle_activity, nominee_technology_maintenance, nominee_fishing_regulations, nominee_fishing_finances, nominee_hiring_new_crew_captains",", "))
+info.types.short<-c("gear","weather","loc","activ","turtle","tech","regs","financ","capt")
+yes.info.type<-lapply(info.types,function(a)dat[,a]=="1")#create a list of which dyad said yes to each info type
+am.a.info.type.l<-rep(list(am.a.blank),length(info.types)) #create a list of blank matrices for each info type (about to be filled)
+names(am.a.info.type.l)<-info.types
+
+## Now within each matrix mark the associations to do with the relevant info type:
+
+## If using fast processor: use list level assignment
+am.a.info.type.l<-mapply(function(am,yes){am[((cbind(dat$resp.id.c,dat$noms.id.c)[yes,]))]<-1 #any dyads which said yes to that info type are marked
+	am}, #returns am
+	am=am.a.info.type.l,yes=yes.info.type,SIMPLIFY=F)
+
+#otherwise, if using low ram: #simple loop to fill it in
+# for(i in 1:length(info.types)){am.a.info.type.l[[i]][cbind(dat$resp.id.c,dat$noms.id.c)[yes.info.type[[i]],]]<-1}
+
+##Clean up NA row that for some reason has been introduced
+dat <- dat[-which(is.na(dat$nominee_most_influential_for_behaviour_changes), arr.ind=TRUE), ]
+colSums(is.na(dat)) #can check the NAs here
+
+#Now build summary matrices (as well as the 'any' ones, might want an 'all' one which is number of information types received)
+info.all<-apply(dat[,info.types],1,function(a)sum(a==1))
+am.a.all<-am.a.any
+am.a.all[((cbind(dat$resp.id.c,dat$noms.id.c)[match(names(info.all),rownames(dat)),]))] <- as.numeric(info.all) #if wanting a null model, can randomly sample this
+
+## Also might want MCA in the case of the 'all' network, simply summing up the number of
+## information types might not be relevant because it might not (a) scale like this 
+## (i.e. its categorical, not numerical) and (b) a '1' in a sparse network might be more
+## important than a '1' in a dense network so, can also carry out an MCA
+## MCA() function [FactoMineR package], #dudi.mca() function [ade4 package], #and 
+## epMCA() [ExPosition package]
+## Need to get the values for each category (for the MCA):
+info.df<-as.data.frame(sapply(am.a.info.type.l,as.character))
+mca.info<-MCA(info.df,graph=F) #dimensions (between 2-9) doesn't matter
+
+## mca.info$eig;mca.info$var;mca.info$ind
+## the positions of the first dimension should be well correlated
+mca.info.dim1<-round(mca.info$ind$coord[,"Dim 1"],8) #using contrib will also work similarly
+mca.info.dim1<-mca.info.dim1+abs(min(mca.info.dim1))
+am.a.info.mca<-am.a.blank
+am.a.info.mca[1:length(am.a.info.mca)]<-mca.info.dim1 #this needs consideration re rotation
+cor(as.numeric(am.a.info.mca),as.numeric(am.a.any))
+
+#check unfolded correlation between them all
+any.and.infos<-c(list(am.a.all),list(am.a.info.mca),list(am.a.any),am.a.info.type.l)
+names(any.and.infos)[1:3]<-c("all","mca","any")
+short.names<-c("all","mca","any",info.types.short)
+
+#find the correlation between each
+res.mat<-sapply(any.and.infos,function(a)sapply(any.and.infos,function(b)cor(as.numeric(a),as.numeric(b))))
+#create overall results matrix
+#res.info.type.cors<-matrix(NA,length(any.and.infos),length(any.and.infos),dimnames=list(any.and.infos,any.and.infos))
+res.info.type.cors<-res.mat
+#rename the rownames for ease
+rownames(res.info.type.cors)<-colnames(res.info.type.cors)<-short.names
+write.csv(round(res.info.type.cors,2),file="/Users/user/Dropbox/Research/2020:2021/Projects active/Arlidge et al. SNA2/Stats/Tables/cors when all inc.csv")
+info.cors.na.diag<-res.info.type.cors
+diag(info.cors.na.diag)<-NA
+overall.mean.cor<-apply(info.cors.na.diag,2,mean,na.rm=T)
+apply(info.cors.na.diag,2,function(a)colnames(info.cors.na.diag)[which(a==max(a,na.rm=T))])
+#for most of them, MCA provides the best cor
+
+# #do same for resp only:
+res.mat.resp<-sapply(any.and.infos,function(a)sapply(any.and.infos,function(b)cor(as.numeric(a[inds$resp,inds$resp]),as.numeric(b[inds$resp,inds$resp]))))
+res.info.type.cors.resp<-res.mat.resp
+#rename the rownames for ease
+rownames(res.info.type.cors.resp)<-colnames(res.info.type.cors.resp)<-short.names
+write.csv(round(res.info.type.cors.resp,2),file="/Users/user/Dropbox/Research/2020:2021/Projects active/Arlidge et al. SNA2/Stats/Tables/cors when only resp.csv")
+
+
+#Is it just due to mca having more non-zero values? actually performs well when considering this
+num.of.yes<-sapply(any.and.infos,function(a)sum(a>0))
+plot(num.of.yes,overall.mean.cor,type="n",ylab="cor",xlab="non-zeros",bty="n",ylim=c(0.79,0.95))
+abline(lm(overall.mean.cor~num.of.yes),col=makeTrans("red",alpha=0.6),lwd=0.5)
+text(num.of.yes,overall.mean.cor, short.names,cex=0.7)
+
+just.infos<-am.a.info.type.l
+just.infos.i<-sapply(just.infos,function(a)graph.adjacency(as.matrix(a),"directed",T,diag=F),simplify=F)
+
+
+#Respondent only objects:
+
+resp.inds<-inds[inds$resp,]
+resp.am.a.info.type.l<-sapply(am.a.info.type.l,function(a)a[inds$resp,inds$resp],simplify=F)
+resp.just.infos<-resp.am.a.info.type.l
+resp.just.infos.i<-lapply(resp.just.infos,function(a)graph.adjacency(a,"directed",T,diag=F))
+resp.am.a.blank<-am.a.blank[inds$resp,inds$resp]
+resp.dat<-dat[dat$respondent %in% inds$name[inds$resp] & dat$nominee %in% inds$name[inds$resp],]
+
+save(list=ls(),file="/Users/user/Dropbox/Research/2020:2021/Projects active/Arlidge et al. SNA2/Stats/Objects/fishery objects 1.2 for Will before Ind info.RData")
+a<-load(file="~/Dropbox/Research/2020:2021/Projects active/Arlidge et al. SNA2/Stats/Objects/fishery objects 1.2 for Will before Ind info.RData")
+
+#Adding on individual level metrics:
+
+## For whole network:
+inds.info<-inds
+info.nets<-just.infos
+info.nets.i<-just.infos.i
+
+simp.mets<-c("deg.out","deg.in","wdeg.out","wdeg.in")
+out.in.degs<-sapply(info.nets,function(a){
+b<-as.matrix(cbind(rowSums(a>0),colSums(a>0),rowSums(a),colSums(a)))
+},simplify=F)
+out.in.degs.mat<-do.call("cbind",out.in.degs)
+colnames(out.in.degs.mat)<-paste(rep(info.types.short,rep(length(simp.mets),length(info.types.short))),rep(simp.mets,length(info.types.short)),sep="_")
+inds.info<-cbind(inds.info[,!colnames(inds.info) %in% colnames(out.in.degs.mat)],out.in.degs.mat)
+
+## inds.info contains the network information
+complex.mets<-c("between","cluster","evc","close","eccent")
+out.complex<-sapply(info.nets.i,function(a){
+b<-as.matrix(cbind(betweenness(a),transitivity(a,type="barrat"),evcent(a,directed=T)$vector,closeness(a,mode="in"),eccentricity(a,mode="in")))
+},simplify=F)
+out.complex.mat<-do.call("cbind",out.complex)
+colnames(out.complex.mat)<-paste(rep(info.types.short,rep(length(complex.mets),length(info.types.short))),rep(complex.mets,length(info.types.short)),sep="_")
+inds.info<-cbind(inds.info[,!colnames(inds.info) %in% colnames(out.complex.mat)],out.complex.mat)
+
+#Now for the respondent only networks:
+resp.inds.info<-resp.inds
+info.nets<-resp.just.infos
+info.nets.i<-resp.just.infos.i
+
+simp.mets<-c("deg.out","deg.in","wdeg.out","wdeg.in")
+out.in.degs<-sapply(info.nets,function(a){
+b<-as.matrix(cbind(rowSums(a>0),colSums(a>0),rowSums(a),colSums(a)))
+},simplify=F)
+out.in.degs.mat<-do.call("cbind",out.in.degs)
+colnames(out.in.degs.mat)<-paste(rep(info.types.short,rep(length(simp.mets),length(info.types.short))),rep(simp.mets,length(info.types.short)),sep="_")
+resp.inds.info<-cbind(resp.inds.info[,!colnames(resp.inds.info) %in% colnames(out.in.degs.mat)],out.in.degs.mat)
+
+#resp.inds.info contains the resp-to-resp network information
+complex.mets<-c("between","cluster","evc","close","eccent")
+out.complex<-sapply(info.nets.i,function(a){
+b<-as.matrix(cbind(betweenness(a),transitivity(a,type="barrat"),evcent(a,directed=T)$vector,closeness(a,mode="in"),eccentricity(a,mode="in")))
+},simplify=F)
+out.complex.mat<-do.call("cbind",out.complex)
+colnames(out.complex.mat)<-paste(rep(info.types.short,rep(length(complex.mets),length(info.types.short))),rep(complex.mets,length(info.types.short)),sep="_")
+resp.inds.info<-cbind(resp.inds.info[,!colnames(resp.inds.info) %in% colnames(out.complex.mat)],out.complex.mat)
+#resp.inds.info contains the resp-to-resp network information
+
+# ## Need to tidy up the dummy variables to be effects... I think...
+# ## Here I'm changing vessel type to effects coding -1 and 1
+# ## Lancha are -1, chalana are 1
+resp.inds.info$vessel_type <- as.numeric(resp.inds.info$vessel_type)
+resp.inds.info$vessel_type[resp.inds.info$vessel_type > 1] <- 0
+resp.inds.info$vessel_type <- as.factor(resp.inds.info$vessel_type)
+table(resp.inds.info$vessel_type)
+typeof(resp.inds.info$vessel_type)
+ 
+# ## Try it with all the dummy variables. For all variables yes is 1 and no is -1
+# ## positive_bycatch_reduction
+# resp.inds.info$positive_bycatch_reduction <- as.numeric(resp.inds.info$positive_bycatch_reduction)
+# resp.inds.info$positive_bycatch_reduction[resp.inds.info$positive_bycatch_reduction == 0] <- -1
+# resp.inds.info$positive_bycatch_reduction <- as.factor(resp.inds.info$positive_bycatch_reduction)
+# table(resp.inds.info$positive_bycatch_reduction)
+# typeof(resp.inds.info$positive_bycatch_reduction)
+# 
+# ## prodelphinus_cooperative_member
+# resp.inds.info$prodelphinus_cooperative_member <- as.numeric(resp.inds.info$prodelphinus_cooperative_member)
+# resp.inds.info$prodelphinus_cooperative_member[resp.inds.info$prodelphinus_cooperative_member == 0] <- -1
+# resp.inds.info$prodelphinus_cooperative_member <- as.factor(resp.inds.info$prodelphinus_cooperative_member)
+# table(resp.inds.info$prodelphinus_cooperative_member)
+# typeof(resp.inds.info$prodelphinus_cooperative_member)
+# 
+# ## aware_of_technologies_being_introduced
+# resp.inds.info$aware_of_technologies_being_introduced <- as.numeric(resp.inds.info$aware_of_technologies_being_introduced)
+# resp.inds.info$aware_of_technologies_being_introduced[resp.inds.info$aware_of_technologies_being_introduced == 0] <- -1
+# resp.inds.info$aware_of_technologies_being_introduced <- as.factor(resp.inds.info$aware_of_technologies_being_introduced)
+# table(resp.inds.info$aware_of_technologies_being_introduced)
+# typeof(resp.inds.info$aware_of_technologies_being_introduced)
+# 
+# ## aware_of_prodelphinus
+# resp.inds.info$aware_of_prodelphinus <- as.numeric(resp.inds.info$aware_of_prodelphinus)
+# resp.inds.info$aware_of_prodelphinus[resp.inds.info$aware_of_prodelphinus == 0] <- -1
+# resp.inds.info$aware_of_prodelphinus <- as.factor(resp.inds.info$aware_of_prodelphinus)
+# table(resp.inds.info$aware_of_prodelphinus)
+# typeof(resp.inds.info$aware_of_prodelphinus)
+# 
+# ## Gremio_board_member
+# resp.inds.info$Gremio_board_member <- as.numeric(resp.inds.info$Gremio_board_member)
+# resp.inds.info$Gremio_board_member[resp.inds.info$Gremio_board_member == 0] <- -1
+# resp.inds.info$Gremio_board_member <- as.factor(resp.inds.info$Gremio_board_member)
+# table(resp.inds.info$Gremio_board_member)
+# typeof(resp.inds.info$Gremio_board_member)
+# 
+# ## Gremio_ADA
+# resp.inds.info$Gremio_ADA <- as.numeric(resp.inds.info$Gremio_ADA)
+# resp.inds.info$Gremio_ADA[resp.inds.info$Gremio_ADA == 0] <- -1
+# resp.inds.info$Gremio_ADA <- as.factor(resp.inds.info$Gremio_ADA)
+# table(resp.inds.info$Gremio_ADA)
+# typeof(resp.inds.info$Gremio_ADA)
+# 
+# ## Gremio_SMUDP
+# resp.inds.info$Gremio_SMUDP <- as.numeric(resp.inds.info$Gremio_SMUDP)
+# resp.inds.info$Gremio_SMUDP[resp.inds.info$Gremio_SMUDP == 0] <- -1
+# resp.inds.info$Gremio_SMUDP <- as.factor(resp.inds.info$Gremio_SMUDP)
+# table(resp.inds.info$Gremio_SMUDP)
+# typeof(resp.inds.info$Gremio_SMUDP)
+# 
+# ## Gremio_ADC
+# resp.inds.info$Gremio_ADC <- as.numeric(resp.inds.info$Gremio_ADC)
+# resp.inds.info$Gremio_ADC[resp.inds.info$Gremio_ADC == 0] <- -1
+# resp.inds.info$Gremio_ADC <- as.factor(resp.inds.info$Gremio_ADC)
+# table(resp.inds.info$Gremio_ADC)
+# typeof(resp.inds.info$Gremio_ADC)
+# 
+# ## surface_net
+# resp.inds.info$surface_net <- as.numeric(resp.inds.info$surface_net)
+# resp.inds.info$surface_net[resp.inds.info$surface_net == 0] <- -1
+# resp.inds.info$surface_net <- as.factor(resp.inds.info$surface_net)
+# table(resp.inds.info$surface_net)
+# typeof(resp.inds.info$surface_net)
+# 
+# ## linear_net
+# resp.inds.info$linear_net <- as.numeric(resp.inds.info$linear_net)
+# resp.inds.info$linear_net[resp.inds.info$linear_net == 0] <- -1
+# resp.inds.info$linear_net <- as.factor(resp.inds.info$linear_net)
+# table(resp.inds.info$linear_net)
+# typeof(resp.inds.info$linear_net)
+
+
+
+##Can save out the object for later use
+save(list=ls(),file="/Users/user/Dropbox/Research/2020:2021/Projects active/Arlidge et al. SNA2/Stats/Objects/fishery objects 1.3 for Will with Ind info.RData")
+load("~/Dropbox/Research/2020:2021/Projects active/Arlidge et al. SNA2/Stats/Objects/fishery objects 1.3 for Will with Ind info.RData")
+
+## Now that all the null models are set up like in the previous study I can start to 
+## look at what's driving the differences between the information-sharing networks
+
+
+################################################################################################
+####                          Modelling sea turtle bycatch in-degree                        ####
+################################################################################################
+
+## TO DO: Double check with Josh the differences between in-degree and win-degree!
+
+## First, I'm going to have a look at modelling sea turtle bycatch by in-degree. 
+
+## Note that data is discrete, nominal, count data. Note that there  is no limit to how many 
+## in-degree ties a fisher can have. 
+
+## Begin by having a look at the shape of the data of the dependent variable
+table(resp.inds.info$turtle_wdeg.in)
+hist(resp.inds.info$turtle_wdeg.in)
+
+## Data looks zero-inflated, but let's have a look at general linear models first, then move
+## on to Poisson and zero inflated models
+
+## Re-level some of the independent variables that I want to model, Not that these are 
+## coded as effects variables (-1,1) rather than dummy variables (0,1)
+
+## Vessel type
+resp.inds.info$vessel_type <- as.factor(resp.inds.info$vessel_type)
+resp.inds.info$vessel_type <- relevel(resp.inds.info$vessel_type, "0")
+
+## Fisher's as members of a fishing association or not
+resp.inds.info$No_gremio <- as.factor(resp.inds.info$No_gremio)
+resp.inds.info$No_gremio <- relevel(resp.inds.info$No_gremio, "1")
+
+## Double check NA's
+table(resp.inds.info %>%
+  dplyr::select(everything()) %>%  
+  summarise_all(funs(sum(is.na(.)))))
+
+## Data looks good. 
+
+## Start modelling by running some simple linear regressions
+mod1<-lm(turtle_wdeg.in ~ as.factor(prodelphinus_cooperative_member), 
+         data=resp.inds.info)
+
+summary(mod1)
+residualPlots(mod1)
+
+## Check for model over dispersion
+DISPP <- (sum(residuals(mod1, type = "pearson")^2))/mod1$df.residual
+DISPP
+
+## This pattern is still found when controlling for age and vessel type
+mod2<-lm(turtle_wdeg.in ~ as.numeric(skip_age) + 
+           as.factor(vessel_type) + 
+           as.factor(prodelphinus_cooperative_member),
+         data=resp.inds.info)
+
+summary(mod2)
+residualPlots(mod2)
+
+## Check for model over dispersion
+DISPP <- (sum(residuals(mod2, type = "pearson")^2))/mod2$df.residual
+DISPP
+
+## And still found when controlling for other parts of attitude e.g. bycatch perception and
+## tech awareness 
+mod3<-lm(turtle_wdeg.in~as.numeric(skip_age) + 
+           as.factor(vessel_type) + 
+           as.factor(positive_bycatch_reduction) + 
+           as.factor(aware_of_technologies_being_introduced) + 
+           as.factor(prodelphinus_cooperative_member),
+         data=resp.inds.info)
+
+summary(mod3)
+residualPlots(mod3)
+
+## Check for model over dispersion
+DISPP <- (sum(residuals(mod3, type = "pearson")^2))/mod3$df.residual
+DISPP
+
+## Here is another model configurations
+mod4<-glm(turtle_wdeg.in~as.numeric(skip_age) + 
+             as.factor(vessel_type) + 
+             as.factor(positive_bycatch_reduction) + 
+             as.factor(aware_of_prodelphinus) +
+             as.factor(prodelphinus_cooperative_member) +
+             as.factor(aware_of_technologies_being_introduced) +
+             as.factor(No_gremio) +
+             as.factor(captain_owner) +
+             as.factor(Gremio_president),
+           data=resp.inds.info,
+           family = "gaussian")
+
+summary(mod4)
+pchisq(mod4$deviance, df=mod4$df.residual, lower.tail=FALSE)
+
+## Have a look at the model fit using a rootogram
+root.glm4 <- rootogram(mod4, main = "glm gaussian Sea turtle bycatch in-degree", fill = "darkgray",ylim = c(-2, 9), max = 10, xlab = "In-degree for sea turtle information", ylab = "sqrt (Frequency)")
+
+## Check for over dispersion...
+DISPP <- (sum(residuals(mod4, type = "pearson")^2))/mod4$df.residual
+DISPP
+
+## Over dispersion is present as this is greater than 1. 
+
+### Have a look at a Poisson distribution based on previous explorations
+modp1<-glm(turtle_wdeg.in~as.numeric(skip_age) + 
+             as.factor(vessel_type) + 
+             as.factor(positive_bycatch_reduction) + 
+             as.factor(aware_of_prodelphinus) +
+             as.factor(prodelphinus_cooperative_member) +
+             as.factor(aware_of_technologies_being_introduced) +
+             as.factor(No_gremio) +
+             as.factor(captain_owner) +
+             as.factor(Gremio_president),
+           data=resp.inds.info,
+           family = "poisson")
+
+summary(modp1)
+pchisq(modp1$deviance, df=modp1$df.residual, lower.tail=FALSE)
+
+## Check for over dispersion...
+DISPP <- (sum(residuals(modp1, type = "pearson")^2))/modp1$df.residual
+DISPP
+## Model is over dispersed
+
+
+## So I might be missing an interaction term?
+## I might be missing a non-linearity
+## I might be missing an important variable?
+
+## OR the issue could be excessive zeros... zero-inflation... 
+hist(resp.inds.info$turtle_wdeg.in)
+table(resp.inds.info$turtle_wdeg.in)
+100*sum(resp.inds.info$turtle_deg.in == 0)/nrow(resp.inds.info)
+## 40.6% of the in-degree are zeros
+## Definite zero inflation present
+
+## What about for node eccentricity?
+hist(resp.inds.info$turtle_eccent)
+table(resp.inds.info$turtle_eccent)
+100*sum(resp.inds.info$turtle_eccent == 0)/nrow(resp.inds.info)
+#40.6%
+
+## Here I can look into either the hurdle model class or the zero-inflated model class
+## But these are models typically used for count data. So I would need to justify using 
+## node-level metric data for these models if I go ahead with using one of these... 
+## That will be the one of the big sticking points with reviewers, I imagine. 
+## I'm currently discussing this Michele Barnes, and Ralf Kurvers (Jens and Robert cc'd 
+## in the latter email discussion. 
+
+# I think a hurdle model is more appropriate than a zero-inflated model for my data because
+# zero-inflated models conceptualise subjects as (1) those who never experience the outcome
+# and (2) those who can experience the outcome but don't always. Whereas hurdle models assume
+# two types of subjects: (1) those who never experience the outcome and (2) those who always
+# experience the outcome at least once (i.e., at the time of data gathering, a fisher will
+# have talked to another fisher about fishing or not). 
+
+# In simple terms: both zero-inflated and hurdle models are described in two parts.
+
+# The first is the on-off part, which is a binary process. The system is "off" with probability
+# 𝜋 and "on" with probability 1−𝜋. (Here, 𝜋 is known as the inflation probability.) When
+# the system is "off," only zero counts are possible. This part is the same for zero-inflated
+# and hurdle models.
+
+# The second part is the counting part, which occurs when the system is "on." This is where
+# zero-inflated and hurdle models differ. In zero-inflated models, counts can still be zero.
+# In hurdle models they must be nonzero. For this part, zero-inflated models use a "usual"
+# discrete probability distribution while hurdle models use a zero-truncated discrete
+# probability distribution function.
+
+# For my data the “off” state is “fisher's saying they never talk to this person about x subject”
+# while the “on” state is “fishers saying yes they talk to that person at least once about that
+# particular sub-category of fishing information”.
+
+## Here is a Hurdle model with Poisson distribution to start
+hp1 <- hurdle(turtle_wdeg.in~as.numeric(skip_age) + 
+                 as.factor(vessel_type) + 
+                 as.factor(positive_bycatch_reduction) + 
+                 as.factor(aware_of_prodelphinus) +
+                 as.factor(prodelphinus_cooperative_member) +
+                 as.factor(aware_of_technologies_being_introduced) +
+                 as.factor(No_gremio) +
+                 as.factor(captain_owner) +
+                 as.factor(Gremio_president) |
+                 as.numeric(skip_age) +
+                 as.factor(vessel_type) +
+                 as.factor(positive_bycatch_reduction) +
+                 as.factor(aware_of_prodelphinus) +
+                 as.factor(prodelphinus_cooperative_member) +
+                 as.factor(aware_of_technologies_being_introduced) +
+                 as.factor(No_gremio) +
+                 as.factor(captain_owner) +
+                 as.factor(Gremio_president),
+             data=resp.inds.info,
+             dist = "poisson",
+             zero.dist = "binomial")
+summary(hp1)
+
+
+## How does the glmmAdaptive package work?
+
+
+## Have a look at the model fit using a rootogram
+root.hnb1 <- rootogram(hp1, main = "Poisson Hurdle 1 Sea turtle bycatch in-degree", fill = "darkgray",ylim = c(-2, 9), max = 10, xlab = "In-degree for sea turtle information", ylab = "sqrt (Frequency)")
+
+## Check the model fit with  residuals 
+res <- resid(hp1)
+plot(fitted(hp1), res)
+
+## Create Q-Q plot for residuals
+qqnorm(res)
+## Add a straight diagonal line to the plot
+qqline(res)
+
+## have a look at density plot of the residuals
+plot(density(res))
+
+## Check for overdispersion...
+DISPP <- (sum(residuals(hp1, type = "pearson")^2))/hp1$df.residual
+DISPP
+
+## Pretty close to 1 at 1.17, but can check to see if Zero-Inflated Negative Binomial GLM 
+## is better at reducing overdispersion
+
+## Have a look at the Vuong Non-Nested Hypothesis Test-Statistic:
+
+## What about a negative binomial hurdle model?
+hnb1 <- hurdle(turtle_wdeg.in~as.numeric(skip_age) + 
+                 as.factor(vessel_type) + 
+                 as.factor(positive_bycatch_reduction) + 
+                 as.factor(aware_of_prodelphinus) +
+                 as.factor(prodelphinus_cooperative_member) +
+                 as.factor(aware_of_technologies_being_introduced) +
+                 as.factor(No_gremio) +
+                 as.factor(captain_owner) +
+                 as.factor(Gremio_president) | 
+                 as.numeric(skip_age) + 
+                 as.factor(vessel_type) + 
+                 as.factor(positive_bycatch_reduction) + 
+                 as.factor(aware_of_prodelphinus) +
+                 as.factor(prodelphinus_cooperative_member) +
+                 as.factor(aware_of_technologies_being_introduced) +
+                 as.factor(No_gremio) +
+                 as.factor(captain_owner) +
+                 as.factor(Gremio_president),
+             data=resp.inds.info,
+             dist = "negbin",
+             zero.dist = "negbin",
+             link = "logit")
+summary(hnb1)
+plot(resid(hnb1, type = "pearson") ~ fitted(hnb1))
+
+## Have a look at the model fit using a rootogram
+root.hnb1 <- rootogram(hnb1, main = "NB Hurdle 1 Sea turtle bycatch in-degree", fill = "darkgray",ylim = c(-2, 9), max = 10, xlab = "In-degree for sea turtle information", ylab = "sqrt (Frequency)")
+
+## Can use this produce 95% confidence intervals if needed
+confint(hnb1)
+
+## Check the model fit with  residuals 
+res <- resid(hnb1)
+plot(fitted(hnb1), res)
+
+## Create Q-Q plot for residuals
+qqnorm(res)
+## Add a straight diagonal line to the plot
+qqline(res)
+
+## have a look at density plot of the residuals
+plot(density(res))
+
+# Dispersion Statistic
+DISPP <- (sum(residuals(hnb1, type = "pearson")^2))/hnb1$df.residual
+DISPP
+## Over dispersion is improved at 1.12
+
+## Have a look at the Vuong Non-Nested Hypothesis Test-Statistic:
+## This is used to determine whether estimating a zero-inflation component is appropriate
+## or whether a single-equation count model should be used.
+vuong(hp1, hnb1)
+# A large, positive test statistic provides evidence of the superiority of model 1 over model 2,
+# while a large, negative test statistic is evidence of the superiority of model 2 over model 1. 
+
+## The negative binomial hurdle model performed better
+
+
+## So I will go forward with a negative binomial hurdle model
+
+##Start dropping terms
+resp.inds.info2 <- resp.inds.info %>%
+  mutate_if(is.character,as.factor)
+
+resp.inds.info2$turtle_wdeg.in <- as.numeric(resp.inds.info2$turtle_wdeg.in)
+resp.inds.info2$turtle_eccent <- as.numeric(resp.inds.info2$turtle_eccent)
+resp.inds.info2$yrs_fishing <- as.numeric(resp.inds.info2$yrs_fishing)
+resp.inds.info2$number_boats_owned <- as.numeric(resp.inds.info2$number_boats_owned)
+resp.inds.info2$yrs_sj <- as.numeric(resp.inds.info2$yrs_sj)
+resp.inds.info2$sj_fisher_gen <- as.numeric(resp.inds.info2$sj_fisher_gen)
+resp.inds.info2$HH_number <- as.numeric(resp.inds.info2$HH_number)
+resp.inds.info2$HH_fishermen <- as.numeric(resp.inds.info2$HH_fishermen)
+resp.inds.info2$skip_age <- as.numeric(resp.inds.info2$skip_age)
+resp.inds.info2$Mean_monthly_income_USD <- as.numeric(resp.inds.info2$Mean_monthly_income_USD)
+
+# ## Here is the full model that I want to manually backwards select from
+h.indeg.full <- hurdle(turtle_wdeg.in ~ yrs_fishing +
+                         skip_age +
+                         vessel_type +
+                         positive_bycatch_reduction +
+                         prodelphinus_cooperative_member +
+                         aware_of_technologies_being_introduced +
+                         aware_of_prodelphinus +
+                         Gremio_board_member + #fishing association variables here
+                         No_gremio +
+                         # Gremio_ADA +
+                         # Gremio_SMUDP +
+                         # Gremio_ADC +
+                         captain_owner + #economic
+                         number_boats_owned +
+                         HH_number +
+                         surface_net + #gear
+                         linear_net +
+                         Completed_PS  | #education
+                         yrs_fishing +
+                         skip_age +
+                         vessel_type +
+                         positive_bycatch_reduction +
+                         prodelphinus_cooperative_member +
+                         aware_of_technologies_being_introduced +
+                         aware_of_prodelphinus +
+                         Gremio_board_member + #fishing association variables here
+                         No_gremio +
+                         # Gremio_ADA +
+                         # Gremio_SMUDP +
+                         # Gremio_ADC +
+                         captain_owner + #economic
+                         number_boats_owned +
+                         HH_number +
+                         surface_net + #gear
+                         linear_net +
+                         Completed_PS ,
+                       data=resp.inds.info2,
+                       dist = "negbin",
+                       zero.dist = "negbin",
+                       link = "logit")
+
+summary(h.indeg.full)
+AIC1.full <- AIC(h.indeg.full)
+BIC1.full <- BIC(h.indeg.full)
+
+## Here is the straight backwards selected model with a threshold of 0.10.
+h.indeg.backward <- hurdle(turtle_wdeg.in ~ as.factor(vessel_type) +
+                         as.factor(positive_bycatch_reduction) +
+                         as.factor(aware_of_technologies_being_introduced)  | 
+                         as.factor(vessel_type) +
+                         as.factor(positive_bycatch_reduction) +
+                         as.factor(aware_of_technologies_being_introduced),
+                       data=resp.inds.info,
+                       dist = "negbin",
+                       zero.dist = "negbin",
+                       link = "logit")
+
+summary(h.indeg.backward)
+
+
+## The backwards selection model is exactly the same if I include the subcategories of 
+## fishing association as three binary independent variables or if I include one binary
+## variable of 'fishing association yes/no (no_gremio)'
+
+## Have a look at the model fit
+# The likelihood ratio test
+
+# H0 (null): You should use the nested model.
+# Ha (alternate): You should use the complex model
+# coding should be: lrtest(nested, complex)
+
+# If you fail to reject the H0, you can conclude that the complex model is NOT
+# significantly more accurate than the nested model, so you would choose to use
+# the nested model instead.
+# lrtest(X, X)
+# we will reject the null hypothesis at the .05 significance level if the Chisq value is under 0.05
+## Here we go with the nested model
+
+# Check the model fit with  residuals
+res <- resid(h.indeg.backward)
+plot(fitted(h.indeg.backward), res)
+
+## Create Q-Q plot for residuals
+qqnorm(res)
+## Add a straight diagonal line to the plot
+qqline(res)
+
+## have a look at density plot of the residuals
+plot(density(res))
+
+## Check for over dispersion...
+DISPP <- (sum(residuals(h.indeg.backward, type = "pearson")^2))/h.indeg.backward$df.residual
+DISPP
+
+## Dispersion stat is 1.11....
+
+
+## Have a look at the fit with a Rootogram
+root.h.indeg.backward <- rootogram(h.indeg.backward, main = "in-degree negbin hurdle backward Sea turtle bycatch in-degree", fill = "#EBEBEB",ylim = c(-2, 9), max = 10, xlab = "In-degree for sea turtle information", ylab = "sqrt (Frequency)")
+
+AIC.backward<- AIC(h.indeg.backward)
+BIC.backward <- BIC(h.indeg.backward)
+
+### This is the forward selection model with a threshold of 0.10
+h.indeg.forward <- hurdle(turtle_wdeg.in ~ as.factor(aware_of_technologies_being_introduced) + 
+                            as.factor(positive_bycatch_reduction) +
+                            as.factor(vessel_type) +
+                            as.factor(prodelphinus_cooperative_member) +
+                            as.numeric(skip_age)  |
+                            as.factor(aware_of_technologies_being_introduced) + 
+                            as.factor(positive_bycatch_reduction) +
+                            as.factor(vessel_type) +
+                            as.factor(prodelphinus_cooperative_member) +
+                            as.numeric(skip_age),
+                          data=resp.inds.info,
+                          dist = "negbin",
+                          zero.dist = "negbin",
+                          link = "logit")
+summary(h.indeg.forward)
+
+# Check the model fit with  residuals
+res2 <- resid(h.indeg.forward)
+plot(fitted(h.indeg.forward), res2)
+
+## Create Q-Q plot for residuals
+qqnorm(res2)
+## Add a straight diagonal line to the plot
+qqline(res2)
+
+## have a look at density plot of the residuals
+plot(density(res2))
+
+## Check for over dispersion...
+DISPP <- (sum(residuals(h.indeg.forward, type = "pearson")^2))/h.indeg.forward$df.residual
+DISPP
+
+## Dispersion stat is 1.13....
+
+## Have a look at the fit with a Rootogram
+root.h.indeg.forward <- rootogram(h.indeg.forward, main = "in-degree negbin hurdle forward Sea turtle bycatch in-degree", fill = "#EBEBEB",ylim = c(-1, 9), max = 10, xlab = "In-degree for sea turtle information", ylab = "sqrt (Frequency)")
+rootogram(h.indeg.forward)
+
+AIC.forward <- AIC(h.indeg.forward)
+BIC.forward <- BIC(h.indeg.forward)
+
+##AIC comes out better with forward selection
+
+## Hurdle exploratory displays
+plot(factor(turtle_wdeg.in == 0) ~ positive_bycatch_reduction, data = resp.inds.info, main = "Zero")
+plot(log(turtle_wdeg.in) ~ positive_bycatch_reduction, data = resp.inds.info, subset = turtle_wdeg.in > 0,
+     main = "Count")
+
+## Can also have a look at the Vuong Non-Nested Hypothesis Test-Statistic to look at different model
+## distributions
+vuong(h.indeg.backward, h.indeg.forward)
+# A large, positive test statistic provides evidence of the superiority of model 1 over model 2,
+# while a large, negative test statistic is evidence of the superiority of model 2 over model 1. 
+
+## The forward selection model performs slight better with AIC
+AIC.forward
+AIC.backward
+
+## The backward selection model performs slightly better with BIC
+BIC.forward
+BIC.backward
+
+## Overall the forward selection model is a better fit with AIC and Viong Non-nested Hypothesis Test-Stat
+
+# FIGURES FOR PAPER
+
+## Figure S4 - Rootogram comparison 
+##standard glm
+glm.gaussian.forward.indeg <- glm(turtle_wdeg.in ~ as.factor(aware_of_technologies_being_introduced) + 
+                                    as.factor(positive_bycatch_reduction) +
+                                    as.factor(vessel_type) +
+                                    as.factor(prodelphinus_cooperative_member) +
+                                    as.numeric(skip_age),
+                                  data=resp.inds.info)
+summary(glm.gaussian.forward.indeg)
+
+##Hurdle Poisson distribution
+h.indeg.forward.p <- hurdle(turtle_wdeg.in ~ as.factor(aware_of_technologies_being_introduced) + 
+                            as.factor(positive_bycatch_reduction) +
+                            as.factor(vessel_type) +
+                            as.factor(prodelphinus_cooperative_member) +
+                            as.numeric(skip_age) |
+                            as.factor(aware_of_technologies_being_introduced) + 
+                            as.factor(positive_bycatch_reduction) +
+                            as.factor(vessel_type) +
+                            as.factor(prodelphinus_cooperative_member) +
+                            as.numeric(skip_age),
+                          data=resp.inds.info,
+                          dist = "poisson",
+                          zero.dist = "poisson",
+                          link = "logit")
+summary(h.indeg.forward.p)
+
+root.glm <- rootogram(glm.gaussian.forward.indeg, main = "Gaussian GLM", lty = 3, shade = FALSE, fill = "#EBEBEB", ylim = c(-2, 9), max = 10, xlab = "In-degree", ylab = "sqrt (Frequency)",return_grob = TRUE)
+root.zip <- rootogram(h.indeg.forward.p, main = "Poisson hurdle",  lty = 3, shade = FALSE, fill = "#EBEBEB", ylim = c(-2, 9), max = 10, xlab = "In-degree", ylab = "sqrt (Frequency)",return_grob = TRUE)
+root.hurdle.nb.fwd <- rootogram(h.indeg.forward, main = "Negative binomial hurdle",  lty = 3, shade = FALSE, fill = "#EBEBEB",ylim = c(-2, 9), max = 10, xlab = "In-degree", ylab = "sqrt (Frequency)",return_grob = TRUE)
+
+
+
+##Plot the final figure
+indeg.root.plot <- autoplot(c(root.glm, root.zip, root.hurdle.nb.fwd),  colour = c("black", "black"),
+                             fill = "grey", size = c(0.6, 0)) + geom_rangeframe() +  theme(axis.text=element_text(size=18),
+                                                                                           axis.title=element_text(size=18),
+                                                                                           text = element_text(size=18),
+                                                                                           panel.background = element_rect(fill = 'white', colour = 'black'),
+                                                                                           strip.background=element_rect(fill="white", colour="white"))
+
+
+quartz.save(indeg.root.plot,  file = "in-degree_rootogram.tiff",type = "tiff", device = dev.cur(), dpi = 600, width = 8, height = 12)
+
+
+## Figure S5: Residual evaluation of the the three probability models. 
+## Layout the figure in columns. 
+par(mfcol=c(3,3))
+
+## Gaussian GLM
+res.p <- resid(glm.gaussian.forward.indeg)
+
+## Residuals vs. Fitted plot
+w1 <- plot(resid(glm.gaussian.forward.indeg, type = "pearson") ~ fitted(glm.gaussian.forward.indeg), main = "Residuals vs. Fitted: Gaussian GLM" , xlab = "Fitted residuals", ylab = "Pearson residuals")
+
+## Create Q-Q plot for residuals
+w2 <- qqnorm((res.p), main = "Q−Q residuals plot: Gaussian GLM", xlab = "Theoretical quantities", ylab = "Sampled residuals" ) + qqline(res.p) + theme_apa()
+
+## Density plot of the residuals
+w3 <- plot(density(res.p), main = "Density plot: Gaussian GLM", ylab = "Density residuals")
+
+## Poisson hurdle
+res.zip <- resid(h.indeg.forward.p)
+
+## Residuals vs. Fitted plot
+w4 <- plot(resid(h.indeg.forward.p, type = "pearson") ~ fitted(h.indeg.forward.p), main = "Residuals vs. Fitted: Poisson hurdle" , xlab = "Fitted residuals", ylab = "Pearson residuals")
+
+# ## Create Q-Q plot for residuals
+w5 <- qqnorm((res.zip), main = "Q−Q residuals plot: Poisson hurdle",xlab = "Theoretical quantiles", ylab = "Quantile residuals") + qqline(res.zip)
+
+## Density plot of the residuals
+w6 <- plot(density(res.zip), main = "Density plot: Poisson hurdle", ylab = "Density residuals")
+
+
+## Negative binomial hurdle
+res.zinb <- resid(h.indeg.forward)
+
+## Residuals vs. Fitted plot
+w7 <- plot(resid(h.indeg.forward, type = "pearson") ~ fitted(h.indeg.forward), main = "Residuals vs. Fitted: NB hurdle" , xlab = "Fitted residuals", ylab = "Pearson residuals")
+
+# ## Create Q-Q plot for residuals
+w8 <- qqnorm((res.zinb), main = "Q−Q residuals plot: NB hurdle",xlab = "Theoretical quantiles", ylab = "Quantile residuals") + qqline(res.zinb)
+
+## Density plot of the residuals
+w9 <- plot(density(res.zinb), main = "Density plot: NB hurdle", ylab = "Density residuals")
+
+
+## Turn off the layout
+dev.off()
+
+
+
+################################################################################################
+####                          Modelling sea turtle bycatch node-eccentricity                ####
+################################################################################################
+
+## Begin by having a look at the shape of the data of the dependent variable
+table(resp.inds.info$turtle_eccent)
+hist(resp.inds.info$turtle_wdeg.in)
+
+## Here is the straight backwards selected model with a threshold of 0.10.
+h.eccent.backward.p <- hurdle(turtle_eccent ~ as.numeric(yrs_fishing) +
+                              as.numeric(skip_age) +
+                              as.factor(vessel_type) +
+                              as.factor(positive_bycatch_reduction) +
+                              as.factor(prodelphinus_cooperative_member) +
+                              as.factor(aware_of_technologies_being_introduced) +
+                              as.factor(aware_of_prodelphinus) +
+                              as.factor(Gremio_board_member) + #fishing association variables here
+                              No_gremio +
+                              as.factor(Gremio_ADA) +
+                              as.factor(Gremio_SMUDP) +
+                              as.factor(Gremio_ADC) +
+                              as.factor(captain_owner) + #economic
+                              as.numeric(number_boats_owned) +
+                              as.numeric(HH_number) +
+                              as.factor(surface_net) + #gear
+                              as.factor(linear_net)   | 
+                              as.numeric(yrs_fishing) +
+                              as.numeric(skip_age) +
+                              as.factor(vessel_type) +
+                              as.factor(positive_bycatch_reduction) +
+                              as.factor(prodelphinus_cooperative_member) +
+                              as.factor(aware_of_technologies_being_introduced) +
+                              as.factor(aware_of_prodelphinus) +
+                              as.factor(Gremio_board_member) + #fishing association variables here
+                              No_gremio +
+                              as.factor(Gremio_ADA) +
+                              as.factor(Gremio_SMUDP) +
+                              as.factor(Gremio_ADC) +
+                              as.factor(captain_owner) + #economic
+                              as.numeric(number_boats_owned) +
+                              as.numeric(HH_number) +
+                              as.factor(surface_net) + #gear
+                              as.factor(linear_net),
+                            data=resp.inds.info,
+                            dist = "poisson",
+                            zero.dist = "poisson",
+                            link = "logit")
+
+summary(h.eccent.backward.p)
+
+h.eccent.backward.nb <- hurdle(turtle_eccent ~ as.numeric(yrs_fishing) +
+                                as.numeric(skip_age) +
+                                as.factor(vessel_type) +
+                                as.factor(positive_bycatch_reduction) +
+                                as.factor(prodelphinus_cooperative_member) +
+                                as.factor(aware_of_technologies_being_introduced) +
+                                as.factor(aware_of_prodelphinus) +
+                                as.factor(Gremio_board_member) + #fishing association variables here
+                                No_gremio +
+                                as.factor(Gremio_ADA) +
+                                as.factor(Gremio_SMUDP) +
+                                as.factor(Gremio_ADC) +
+                                as.factor(captain_owner) + #economic
+                                as.numeric(number_boats_owned) +
+                                as.numeric(HH_number) +
+                                as.factor(surface_net) + #gear
+                                as.factor(linear_net)   | 
+                                as.numeric(yrs_fishing) +
+                                as.numeric(skip_age) +
+                                as.factor(vessel_type) +
+                                as.factor(positive_bycatch_reduction) +
+                                as.factor(prodelphinus_cooperative_member) +
+                                as.factor(aware_of_technologies_being_introduced) +
+                                as.factor(aware_of_prodelphinus) +
+                                as.factor(Gremio_board_member) + #fishing association variables here
+                                No_gremio +
+                                as.factor(Gremio_ADA) +
+                                as.factor(Gremio_SMUDP) +
+                                as.factor(Gremio_ADC) +
+                                as.factor(captain_owner) + #economic
+                                as.numeric(number_boats_owned) +
+                                as.numeric(HH_number) +
+                                as.factor(surface_net) + #gear
+                                as.factor(linear_net),
+                              data=resp.inds.info,
+                              dist = "negbin",
+                              zero.dist = "negbin",
+                              link = "logit")
+
+summary(h.eccent.backward.nb)
+
+
+## Here is the straight backward selection model when fishing associatio is divided
+h.eccent.backward1 <- hurdle(turtle_eccent ~ as.factor(vessel_type) +
+                              # No_gremio +
+                              as.factor(Gremio_ADC)  | 
+                              as.factor(vessel_type) +
+                              # No_gremio +
+                              as.factor(Gremio_ADC),
+                            data=resp.inds.info,
+                            dist = "negbin",
+                            zero.dist = "negbin",
+                            link = "logit")
+
+summary(h.eccent.backward1)
+
+## Here is the straight backward selection model when fishing association is  combined
+h.eccent.backward2 <- hurdle(turtle_eccent ~ 
+                         as.factor(vessel_type) | 
+                         as.factor(vessel_type),
+                       data=resp.inds.info,
+                       dist = "negbin",
+                       zero.dist = "negbin",
+                       link = "logit")
+
+summary(h.eccent.backward2)
+AICe1.full <- AIC(h.eccent.backward2)
+BICe1.full <- BIC(h.eccent.backward2)
+
+
+#### STOP
+
+### This is the final in-degree model (hurdle neg.bin forward selection  with a threshold of 0.10)
+h.indeg.forward <- hurdle(turtle_wdeg.in ~ as.factor(aware_of_technologies_being_introduced) + 
+                            as.factor(positive_bycatch_reduction) +
+                            as.factor(vessel_type) +
+                            as.factor(prodelphinus_cooperative_member) +
+                            as.numeric(skip_age)  |
+                            as.factor(aware_of_technologies_being_introduced) + 
+                            as.factor(positive_bycatch_reduction) +
+                            as.factor(vessel_type) +
+                            as.factor(prodelphinus_cooperative_member) +
+                            as.numeric(skip_age),
+                          data=resp.inds.info,
+                          dist = "negbin",
+                          zero.dist = "negbin",
+                          link = "logit")
+summary(h.indeg.forward)
+
+## And Poisson
+h.indeg.forward.p <- hurdle(turtle_wdeg.in ~ as.factor(aware_of_technologies_being_introduced) + 
+                            as.factor(positive_bycatch_reduction) +
+                            as.factor(vessel_type) +
+                            as.factor(prodelphinus_cooperative_member) +
+                            as.numeric(skip_age)  |
+                            as.factor(aware_of_technologies_being_introduced) + 
+                            as.factor(positive_bycatch_reduction) +
+                            as.factor(vessel_type) +
+                            as.factor(prodelphinus_cooperative_member) +
+                            as.numeric(skip_age),
+                          data=resp.inds.info,
+                          dist = "poisson",
+                          zero.dist = "poisson",
+                          link = "logit")
+summary(h.indeg.forward.p)
+
+## Check for overdispersion...
+DISPP <- (sum(residuals(h.indeg.forward.p, type = "pearson")^2))/h.indeg.forward.p$df.residual
+DISPP
+
+## And GLM
+h.indeg.forward.glm <- hurdle(turtle_wdeg.in ~ as.factor(aware_of_technologies_being_introduced) + 
+                              as.factor(positive_bycatch_reduction) +
+                              as.factor(vessel_type) +
+                              as.factor(prodelphinus_cooperative_member) +
+                              as.numeric(skip_age),
+                            data=resp.inds.info,
+                            family = "gaussian")
+summary(h.indeg.forward.glm)
+
+## Check for overdispersion...
+DISPP <- (sum(residuals(h.indeg.forward.glm, type = "pearson")^2))/h.indeg.forward.glm$df.residual
+DISPP
+
+
+### This is the final eccentricity model (hurdle neg.bin forward selection model with a threshold of 0.10)
+h.eccent.forward1 <- hurdle(turtle_eccent ~ as.factor(vessel_type) +
+                              as.factor(Gremio_ADC) +
+                              as.factor(prodelphinus_cooperative_member) +
+                              as.numeric(skip_age)  |
+                              as.factor(vessel_type) +
+                              as.factor(Gremio_ADC) +
+                              as.factor(prodelphinus_cooperative_member) +
+                              as.numeric(skip_age),
+                            data=resp.inds.info,
+                            dist = "negbin",
+                            zero.dist = "negbin",
+                            link = "logit")
+summary(h.eccent.forward1)
+
+## Check for overdispersion...
+DISPP <- (sum(residuals(h.eccent.forward1, type = "pearson")^2))/h.eccent.forward1$df.residual
+DISPP
+
+
+## Have a look a Poisson distribution
+### This is the poisson eccentricity model (hurdle neg.bin forward selection model with a threshold of 0.10)
+h.eccent.forward.p <- hurdle(turtle_eccent ~ as.factor(vessel_type) +
+                              as.factor(Gremio_ADC) +
+                              as.factor(prodelphinus_cooperative_member) +
+                              as.numeric(skip_age)  |
+                              as.factor(vessel_type) +
+                              as.factor(Gremio_ADC) +
+                              as.factor(prodelphinus_cooperative_member) +
+                              as.numeric(skip_age),
+                            data=resp.inds.info,
+                            dist = "poisson",
+                            zero.dist = "poisson",
+                            link = "logit")
+summary(h.eccent.forward.p)
+
+## Check for overdispersion...
+DISPP <- h.eccent.forward.glm <- glm(turtle_eccent ~ as.factor(vessel_type) +
+                                 as.factor(Gremio_ADC) +
+                                 as.factor(prodelphinus_cooperative_member) +
+                                 as.numeric(skip_age),
+                               data=resp.inds.info,
+                               family = "gaussian")
+summary(h.eccent.forward.glm)
+
+## Check for overdispersion...
+DISPP <- (sum(residuals(h.eccent.forward.glm, type = "pearson")^2))/h.eccent.forward.glm$df.residual
+DISPP
+
+
+root.e.glm <- rootogram(h.eccent.forward.glm, main = "Gaussian GLM", lty = 3, shade = FALSE, fill = "white", ylim = c(-2, 9), max = 10, xlab = "Node eccentricity", ylab = "sqrt (Frequency)",return_grob = TRUE)
+root.e.zip <- rootogram(h.eccent.forward.p, main = "Poisson hurdle",  lty = 3, shade = FALSE, fill = "white", ylim = c(-2, 9), max = 10, xlab = "Node eccentricity", ylab = "sqrt (Frequency)",return_grob = TRUE)
+root.e.hurdle.nb.fwd <- rootogram(h.eccent.forward1, main = "Negative binomial hurdle",  lty = 3, shade = FALSE, fill = "white",ylim = c(-2, 9), max = 10, xlab = "Node eccentricity", ylab = "sqrt (Frequency)",return_grob = TRUE)
+
+##Plot the final figure
+eccent.root.plot <- autoplot(c(root.e.glm, root.e.zip, root.e.hurdle.nb.fwd),  colour = c("black", "black"),
+                            fill = "grey", size = c(0.6, 0)) + geom_rangeframe() +  theme(axis.text=element_text(size=18),
+                                                                                          axis.title=element_text(size=18),
+                                                                                          text = element_text(size=22),
+                                                                                          axis.title.y =element_text(colour = "white"),
+                                                                                          axis.title.x =element_text(vjust = -5),
+                                                                                          plot.margin = margin(0, 1, 2, 0, "cm"), 
+                                                                                          panel.background = element_rect(fill = 'white', colour = 'white'),
+                                                                                          strip.background=element_rect(fill="white", colour="white"),
+                                                                                          strip.text=element_text(vjust=1))
+
+quartz.save(eccent.root.plot,  file = "eccentricity_rootogram.tiff",type = "tiff", device = dev.cur(), dpi = 600, width = 8, height = 12)
+
+##Plot the final figure
+indeg.root.plot <- autoplot(c(root.glm, root.zip, root.hurdle.nb.fwd),  colour = c("black", "black"),
+                            fill = "grey", size = c(0.6, 0)) + geom_rangeframe() +  theme(axis.text=element_text(size=18),
+                                                                                          axis.title=element_text(size=18),
+                                                                                          text = element_text(size=18),
+                                                                                          axis.title.x =element_text(vjust = -5),
+                                                                                          axis.title.y =element_text(vjust = 8),
+                                                                                          plot.margin = margin(0, 0, 2, 2, "cm"), 
+                                                                                          panel.background = element_rect(fill = 'white', colour = 'white'),
+                                                                                          strip.background=element_rect(fill="white", colour="white"), 
+                                                                                          strip.text.y = element_text(colour = "white"))
+
+
+## Have a look at plotting both figures together
+master.root <- ggarrange(indeg.root.plot, eccent.root.plot, nrow = 1)
+
+quartz.save(master.root,  file = "rootmaster.tiff",type = "tiff", device = dev.cur(), dpi = 600, width = 12, height = 12)
+
+
+
+
+################################################################################################
+####                          Summary stats for Table 1 of manuscript                       ####
+################################################################################################
+
+## Age
+resp.inds.info$skip_age <- as.numeric(resp.inds.info$skip_age)
+range(resp.inds.info$skip_age)
+mean(resp.inds.info$skip_age)
+sd(resp.inds.info$skip_age)
+
+## vessel type
+resp.inds.info$vessel_type <- as.numeric(resp.inds.info$vessel_type)
+resp.inds.info$vessel_type[resp.inds.info$vessel_type > 1] <- 0
+range(resp.inds.info$vessel_type)
+mean(resp.inds.info$vessel_type)
+sd(resp.inds.info$vessel_type)
+resp.inds.info$vessel_type <- as.factor(resp.inds.info$vessel_type)
+
+
+## Positive towards bycatch reduction
+resp.inds.info$positive_bycatch_reduction <- as.numeric(resp.inds.info$positive_bycatch_reduction)
+range(resp.inds.info$positive_bycatch_reduction)
+mean(resp.inds.info$positive_bycatch_reduction)
+sd(resp.inds.info$positive_bycatch_reduction)
+resp.inds.info$positive_bycatch_reduction <- as.factor(resp.inds.info$positive_bycatch_reduction)
+
+## Positive towards bycatch reduction
+resp.inds.info$prodelphinus_cooperative_member <- as.numeric(resp.inds.info$prodelphinus_cooperative_member)
+range(resp.inds.info$prodelphinus_cooperative_member)
+mean(resp.inds.info$prodelphinus_cooperative_member)
+sd(resp.inds.info$prodelphinus_cooperative_member)
+resp.inds.info$prodelphinus_cooperative_member <- as.factor(resp.inds.info$prodelphinus_cooperative_member)
+
+## Positive towards bycatch reduction
+resp.inds.info$aware_of_technologies_being_introduced <- as.numeric(resp.inds.info$aware_of_technologies_being_introduced)
+range(resp.inds.info$aware_of_technologies_being_introduced)
+mean(resp.inds.info$aware_of_technologies_being_introduced)
+sd(resp.inds.info$aware_of_technologies_being_introduced)
+resp.inds.info$aware_of_technologies_being_introduced <- as.factor(resp.inds.info$aware_of_technologies_being_introduced)
+
+## Fishing association member (ADC)
+resp.inds.info$Gremio_ADC <- as.numeric(resp.inds.info$Gremio_ADC)
+range(resp.inds.info$Gremio_ADC)
+mean(resp.inds.info$Gremio_ADC)
+sd(resp.inds.info$Gremio_ADC)
+resp.inds.info$Gremio_ADC <- as.factor(resp.inds.info$Gremio_ADC)
+
+################################################################################################
+####                          Permutation procedure for hurdle regression                   ####
+################################################################################################
+
+## Function for calculating permuted p-values
+perm.p<-function(ob,perms){
+  perc <- ecdf(perms) #function for finding where a value will lie (i.e. its percentile) in this distribution
+  perc.ob<-perc(ob) #gets percentile
+  p.pval<-min(c(1-perc.ob,0+perc.ob))*2 #get p val of it
+  p.pval}
+
+
+## First up, in-degree hurdle regression
+
+## Take the final model for in-degree and re-name it.
+real.mod<-summary(hurdle(turtle_wdeg.in ~ as.factor(aware_of_technologies_being_introduced) +
+                           as.factor(positive_bycatch_reduction) +
+                           as.factor(vessel_type) +
+                           as.factor(prodelphinus_cooperative_member) +
+                           as.numeric(skip_age)  |
+                           as.factor(aware_of_technologies_being_introduced) +
+                           as.factor(positive_bycatch_reduction) +
+                           as.factor(vessel_type) +
+                           as.factor(prodelphinus_cooperative_member) +
+                           as.numeric(skip_age),
+                         data=resp.inds.info,
+                         dist = "negbin",
+                         zero.dist = "negbin",
+                         link = "logit"))
+real.mod
+
+## Here are the full 95% CI for the final table including Log(theta)
+se.count <- real.mod$coefficients$count[,2]
+ULcount = real.mod$coefficients$count[,1] + 1.96 * se.count
+LLcount = real.mod$coefficients$count[,1] - 1.96 * se.count
+ULcount
+LLcount
+
+se.zero <- real.mod$coefficients$zero[,2]
+ULzero = real.mod$coefficients$zero[,1] + 1.96 * se.zero
+LLzero = real.mod$coefficients$zero[,1] - 1.96 * se.zero
+ULzero
+LLzero
+
+## Pull out the z-values for each model component
+real.zvals.count <- real.mod$coefficients$count[,3]
+real.zvals.zero <- real.mod$coefficients$zero[,3]
+
+## and the coefficients for each model component
+real.coef.count <- real.mod$coefficients$count[,1]
+real.coef.zero <- real.mod$coefficients$zero[,1]
+
+## Generate blank permuted values
+## z values
+perm.zvals.count <- matrix(NA,1000,length(real.zvals.count))
+perm.zvals.zero <- matrix(NA,1000,length(real.zvals.zero))
+
+## coefficients
+perm.coef.count <- matrix(NA,1000,length(real.coef.count))
+perm.coef.zero <- matrix(NA,1000,length(real.coef.zero))
+
+## Rename the original database that holds all the values for the model
+resp.inds.info.perm<-resp.inds.info
+
+## Then sample the permuted dependent variable
+set.seed(1987)
+for (i in 1:1000){
+
+  resp.inds.info.perm$turtle_wdeg.in<- sample(resp.inds.info.perm$turtle_wdeg.in)
+
+  perm.mod<-summary(hurdle(turtle_wdeg.in ~ as.factor(aware_of_technologies_being_introduced) +
+                             as.factor(positive_bycatch_reduction) +
+                             as.factor(vessel_type) +
+                             as.factor(prodelphinus_cooperative_member) +
+                             as.numeric(skip_age)  |
+                             as.factor(aware_of_technologies_being_introduced) +
+                             as.factor(positive_bycatch_reduction) +
+                             as.factor(vessel_type) +
+                             as.factor(prodelphinus_cooperative_member) +
+                             as.numeric(skip_age),
+                           data=resp.inds.info.perm,
+                           dist = "negbin",
+                           zero.dist = "negbin",
+                           link = "logit"))
+
+  perm.zvals.count[i,] <- perm.mod$coefficients$count[,3]
+  perm.zvals.zero[i,] <- perm.mod$coefficients$zero[,3]
+  perm.coef.count[i,] <- perm.mod$coefficients$count[,1]
+  perm.coef.zero[i,] <- perm.mod$coefficients$zero[,1]
+}
+
+## Take a look at the permuted values
+## z values
+perm.zvals.count
+perm.zvals.zero
+## coefficients
+perm.coef.count
+perm.coef.zero
+
+
+## and the real z values
+real.zvals.count
+real.zvals.zero
+
+## and the real coefficients
+real.coef.count
+real.coef.zero
+
+## Calculate 95% C.I. for the permuted values
+
+## z values
+## For the count component of the model
+range95.count <- apply(perm.zvals.count,2,quantile,probs=c(0.975,0.025),na.rm=T)
+range95.count
+
+## For the binomial component of the model
+z.range95.zero <- apply(perm.zvals.zero,2,quantile,probs=c(0.975,0.025),na.rm=T)
+z.range95.zero
+
+## coefficients
+## For the count component of the model
+coef.range95.count <- apply(perm.coef.count,2,quantile,probs=c(0.975,0.025),na.rm=T)
+coef.range95.count
+
+## For the binomial component of the model
+coef.range95.zero <- apply(perm.coef.zero,2,quantile,probs=c(0.975,0.025),na.rm=T)
+coef.range95.zero
+
+## and standard errors from the permuted coefficient estimates
+## For the count component of the model
+coef.stderr.count <- std.error(perm.coef.count)
+coef.stderr.count
+
+## For the binomial component of the model
+coef.stderr.zero <- std.error(perm.coef.zero)
+coef.stderr.zero
+
+## Have a look at specific p-values using this code
+# perm.p(real.zvals.count[3],perm.zvals.count[,3])
+# perm.p(real.zvals.zero[3],perm.zvals.zero[,3])
+
+## To extract all the p-values at once, generate blank variables for the count and zero model components
+perm.count.pvals<-NA
+perm.zero.pvals<-NA
+
+##  count model permuted p-values
+set.seed(1987)
+for (j in 1:length(real.zvals.count)){
+
+  perm.count.pvals[j]<-perm.p(real.zvals.count[j],perm.zvals.count[,j])
+}
+
+perm.count.pvals
+
+## Binomial model permuted p-values
+set.seed(1987)
+for (j in 1:length(real.zvals.zero)){
+
+  perm.zero.pvals[j]<-perm.p(real.zvals.zero[j],perm.zvals.zero[,j])
+}
+
+perm.zero.pvals
+
+## Plot the values of the coefficients for each model on permuted networks
+## Using line plots
+## Currently have these in the SM of the paper
+
+## z values
+## Using line plots
+
+## Count model
+par(mfcol=c(3,2))
+plot(perm.zvals.count[,1],type = "l", main = "Intercept", ylab = "z value", col = "lightblue")
+abline(h=real.zvals.count[1],col="#CD5C5C",lwd=3)
+plot(perm.zvals.count[,2],type = "l", main = "Aware of mitigation technologies", ylab = "z value", col = "lightblue")
+abline(h=real.zvals.count[2],col="#CD5C5C",lwd=3)
+plot(perm.zvals.count[,3],type = "l", main = "Positive towads coop participation", ylab = "z value", col = "lightblue")
+abline(h=real.zvals.count[3],col="#CD5C5C",lwd=3)
+plot(perm.zvals.count[,4],type = "l", main = "Vessel type", ylab = "z value", col = "lightblue")
+abline(h=real.zvals.count[4],col="#CD5C5C",lwd=3)
+plot(perm.zvals.count[,5],type = "l", main = "Cooperative member", ylab = "z value", col = "lightblue")
+abline(h=real.zvals.count[5],col="#CD5C5C",lwd=3)
+plot(perm.zvals.count[,6],type = "l", main = "Age", ylab = "z value", col = "lightblue")
+abline(h=real.zvals.count[6],col="#CD5C5C",lwd=3)
+
+## Binomial model
+plot(perm.zvals.zero[,1],type = "l", main = "Intercept", ylab = "z value", col = "lightblue")
+abline(h=real.zvals.zero[1],col="#CD5C5C",lwd=3)
+plot(perm.zvals.zero[,2],type = "l", main = "Aware of mitigation technologies", ylab = "z value", col = "lightblue")
+abline(h=real.zvals.zero[2],col="#CD5C5C",lwd=3)
+plot(perm.zvals.zero[,3],type = "l", main = "Positive towads coop participation", ylab = "z value", col = "lightblue")
+abline(h=real.zvals.zero[3],col="#CD5C5C",lwd=3)
+plot(perm.zvals.zero[,4],type = "l", main = "Vessel type", ylab = "z value", col = "lightblue")
+abline(h=real.zvals.zero[4],col="#CD5C5C",lwd=3)
+plot(perm.zvals.zero[,5],type = "l", main = "Cooperative member", ylab = "z value", col = "lightblue")
+abline(h=real.zvals.zero[5],col="#CD5C5C",lwd=3)
+plot(perm.zvals.zero[,6],type = "l", main = "Age", ylab = "z value", col = "lightblue")
+abline(h=real.zvals.zero[6],col="#CD5C5C",lwd=3)
+
+## coefficients
+## Count model
+par(mfcol=c(3,2))
+plot(perm.coef.count[,1],type = "l", main = "Intercept", ylab = "Coefficient estimate", col = "lightblue")
+abline(h=real.coef.count[1],col="#CD5C5C",lwd=3)
+plot(perm.coef.count[,2],type = "l", main = "Aware of mitigation technologies", ylab = "Coefficient estimate", col = "lightblue")
+abline(h=real.coef.count[2],col="#CD5C5C",lwd=3)
+plot(perm.coef.count[,3],type = "l", main = "Positive towads coop participation", ylab = "Coefficient estimate", col = "lightblue")
+abline(h=real.coef.count[3],col="#CD5C5C",lwd=3)
+plot(perm.coef.count[,4],type = "l", main = "Vessel type", ylab = "Coefficient estimate", col = "lightblue")
+abline(h=real.coef.count[4],col="#CD5C5C",lwd=3)
+plot(perm.coef.count[,5],type = "l", main = "Cooperative member", ylab = "Coefficient estimate", col = "lightblue")
+abline(h=real.coef.count[5],col="#CD5C5C",lwd=3)
+plot(perm.coef.count[,6],type = "l", main = "Age", ylab = "Coefficient estimate", col = "lightblue")
+abline(h=real.coef.count[6],col="#CD5C5C",lwd=3)
+
+## Binomial model
+plot(perm.coef.zero[,1],type = "l", main = "Intercept", ylab = "Coefficient estimate", col = "lightblue")
+abline(h=real.coef.zero[1],col="#CD5C5C",lwd=3)
+plot(perm.coef.zero[,2],type = "l", main = "Aware of mitigation technologies", ylab = "Coefficient estimate", col = "lightblue")
+abline(h=real.coef.zero[2],col="#CD5C5C",lwd=3)
+plot(perm.coef.zero[,3],type = "l", main = "Positive towads coop participation", ylab = "Coefficient estimate", col = "lightblue")
+abline(h=real.coef.zero[3],col="#CD5C5C",lwd=3)
+plot(perm.coef.zero[,4],type = "l", main = "Vessel type", ylab = "Coefficient estimate", col = "lightblue")
+abline(h=real.coef.zero[4],col="#CD5C5C",lwd=3)
+plot(perm.coef.zero[,5],type = "l", main = "Cooperative member", ylab = "Coefficient estimate", col = "lightblue")
+abline(h=real.coef.zero[5],col="#CD5C5C",lwd=3)
+plot(perm.coef.zero[,6],type = "l", main = "Age", ylab = "Coefficient estimate", col = "lightblue")
+abline(h=real.coef.zero[6],col="#CD5C5C",lwd=3)
+dev.off()
+
+
+## Next up, the node eccentricity hurdle regression
+
+## Take the final model for in-degree and re-name it. 
+
+## Take the final model for in-degree and re-name it. 
+real.mod<-summary(hurdle(turtle_eccent ~ as.factor(vessel_type) +
+                           as.factor(Gremio_ADC) +
+                           as.factor(prodelphinus_cooperative_member) +
+                           as.numeric(skip_age)  |
+                           as.factor(vessel_type) +
+                           as.factor(Gremio_ADC) +
+                           as.factor(prodelphinus_cooperative_member) +
+                           as.numeric(skip_age),
+                         data=resp.inds.info,
+                         dist = "negbin",
+                         zero.dist = "negbin",
+                         link = "logit"))
+real.mod
+
+## Here are the full 95% CI for the final table including Log(theta)
+se.count <- real.mod$coefficients$count[,2]
+ULcount = real.mod$coefficients$count[,1] + 1.96 * se.count
+LLcount = real.mod$coefficients$count[,1] - 1.96 * se.count
+ULcount
+LLcount
+
+se.zero <- real.mod$coefficients$zero[,2]
+ULzero = real.mod$coefficients$zero[,1] + 1.96 * se.zero
+LLzero = real.mod$coefficients$zero[,1] - 1.96 * se.zero
+ULzero
+LLzero
+
+## Pull out the z-values for each model component
+real.zvals.count <- real.mod$coefficients$count[,3]
+real.zvals.zero <- real.mod$coefficients$zero[,3]
+
+## and the coefficients for each model component
+real.coef.count <- real.mod$coefficients$count[,1]
+real.coef.zero <- real.mod$coefficients$zero[,1]
+
+## Generate blank permuted values
+## z values
+perm.zvals.count <- matrix(NA,1000,length(real.zvals.count))
+perm.zvals.zero <- matrix(NA,1000,length(real.zvals.zero))
+
+## coefficients
+perm.coef.count <- matrix(NA,1000,length(real.coef.count))
+perm.coef.zero <- matrix(NA,1000,length(real.coef.zero))
+
+## Rename the original database that holds all the values for the model
+resp.inds.info.perm<-resp.inds.info
+
+## Then sample the permuted dependent variable
+set.seed(1986)
+for (i in 1:1000){
+  
+  resp.inds.info.perm$turtle_eccent <- sample(resp.inds.info.perm$turtle_eccent)
+  
+  perm.mod<-summary(hurdle(turtle_eccent ~ as.factor(vessel_type) +
+                             as.factor(Gremio_ADC) +
+                             as.factor(prodelphinus_cooperative_member) +
+                             as.numeric(skip_age)  |
+                             as.factor(vessel_type) +
+                             as.factor(Gremio_ADC) +
+                             as.factor(prodelphinus_cooperative_member) +
+                             as.numeric(skip_age),
+                           data=resp.inds.info.perm,
+                           dist = "negbin",
+                           zero.dist = "negbin",
+                           link = "logit"))
+  
+  perm.zvals.count[i,] <- perm.mod$coefficients$count[,3]
+  perm.zvals.zero[i,] <- perm.mod$coefficients$zero[,3]
+  perm.coef.count[i,] <- perm.mod$coefficients$count[,1]
+  perm.coef.zero[i,] <- perm.mod$coefficients$zero[,1]
+}
+
+## Take a look at the permuted values
+## z values
+perm.zvals.count
+perm.zvals.zero
+## coefficients
+perm.coef.count
+perm.coef.zero
+
+## and the real z values
+real.zvals.count
+real.zvals.zero
+
+## and the real coefficients
+real.coef.count
+real.coef.zero
+
+## Calculate 95% C.I. for the permuted values
+
+## z values
+## For the count component of the model
+range95.count <- apply(perm.zvals.count,2,quantile,probs=c(0.975,0.025),na.rm=T)
+range95.count
+
+## For the binomial component of the model
+z.range95.zero <- apply(perm.zvals.zero,2,quantile,probs=c(0.975,0.025),na.rm=T)
+z.range95.zero
+
+## coefficients
+## For the count component of the model
+coef.range95.count <- apply(perm.coef.count,2,quantile,probs=c(0.975,0.025),na.rm=T)
+coef.range95.count
+
+## For the binomial component of the model
+coef.range95.zero <- apply(perm.coef.zero,2,quantile,probs=c(0.975,0.025),na.rm=T)
+coef.range95.zero
+
+## and standard errors from the permuted coefficient estimates
+## For the count component of the model
+coef.stderr.count <- std.error(perm.coef.count)
+coef.stderr.count
+
+## For the binomial component of the model
+coef.stderr.zero <- std.error(perm.coef.zero)
+coef.stderr.zero
+
+## Have a look at specific p-values using this code
+# perm.p(real.zvals.count[3],perm.zvals.count[,3])
+# perm.p(real.zvals.zero[3],perm.zvals.zero[,3])
+
+## To extract all the p-values at once, generate blank variables for the count and zero model components
+perm.count.pvals<-NA
+perm.zero.pvals<-NA
+
+##  count model permuted p-values
+set.seed(1986)
+for (j in 1:length(real.zvals.count)){
+  
+  perm.count.pvals[j]<-perm.p(real.zvals.count[j],perm.zvals.count[,j])
+}
+
+perm.count.pvals
+
+## Binomial model permuted p-values
+set.seed(1986)
+for (j in 1:length(real.zvals.zero)){
+  
+  perm.zero.pvals[j]<-perm.p(real.zvals.zero[j],perm.zvals.zero[,j])
+}
+
+perm.zero.pvals
+
+## Plot the values of the coefficients for each model on permuted networks  
+## Using line plots
+## Currently have these in the SM of the paper
+
+## z values 
+## Using line plots
+
+## Count model
+par(mfcol=c(3,2))
+plot(perm.zvals.count[,1],type = "l", main = "Intercept", ylab = "z value", col = "lightblue")
+abline(h=real.zvals.count[1],col="#CD5C5C",lwd=3)
+plot(perm.zvals.count[,2],type = "l", main = "Vessel type", ylab = "z value", col = "lightblue")
+abline(h=real.zvals.count[2],col="#CD5C5C",lwd=3)
+plot(perm.zvals.count[,3],type = "l", main = "Fishing association C member", ylab = "z value", col = "lightblue")
+abline(h=real.zvals.count[3],col="#CD5C5C",lwd=3)
+plot(perm.zvals.count[,4],type = "l", main = "Cooperative member", ylab = "z value", col = "lightblue")
+abline(h=real.zvals.count[4],col="#CD5C5C",lwd=3)
+plot(perm.zvals.count[,5],type = "l", main = "Age", ylab = "z value", col = "lightblue")
+abline(h=real.zvals.count[5],col="#CD5C5C",lwd=3)
+
+
+## Binomial model
+plot(perm.zvals.zero[,1],type = "l", main = "Intercept", ylab = "z value", col = "lightblue")
+abline(h=real.zvals.zero[1],col="#CD5C5C",lwd=3)
+plot(perm.zvals.zero[,2],type = "l", main = "Vessel type", ylab = "z value", col = "lightblue")
+abline(h=real.zvals.zero[2],col="#CD5C5C",lwd=3)
+plot(perm.zvals.zero[,3],type = "l", main = "Fishing association C member", ylab = "z value", col = "lightblue")
+abline(h=real.zvals.zero[3],col="#CD5C5C",lwd=3)
+plot(perm.zvals.zero[,4],type = "l", main = "Cooperative member", ylab = "z value", col = "lightblue")
+abline(h=real.zvals.zero[4],col="#CD5C5C",lwd=3)
+plot(perm.zvals.zero[,5],type = "l", main = "Age", ylab = "z value", col = "lightblue")
+abline(h=real.zvals.zero[5],col="#CD5C5C",lwd=3)
+
+
+## coefficients
+## Count model
+par(mfcol=c(3,2))
+plot(perm.coef.count[,1],type = "l", main = "Intercept", ylab = "Coefficient estimate", col = "lightblue")
+abline(h=real.coef.count[1],col="#CD5C5C",lwd=3)
+plot(perm.coef.count[,2],type = "l", main = "Vessel type", ylab = "Coefficient estimate", col = "lightblue")
+abline(h=real.coef.count[2],col="#CD5C5C",lwd=3)
+plot(perm.coef.count[,3],type = "l", main = "Fishing association C member", ylab = "Coefficient estimate", col = "lightblue")
+abline(h=real.coef.count[3],col="#CD5C5C",lwd=3)
+plot(perm.coef.count[,4],type = "l", main = "Cooperative member", ylab = "Coefficient estimate", col = "lightblue")
+abline(h=real.coef.count[4],col="#CD5C5C",lwd=3)
+plot(perm.coef.count[,5],type = "l", main = "Age", ylab = "Coefficient estimate", col = "lightblue")
+abline(h=real.coef.count[5],col="#CD5C5C",lwd=3)
+
+
+## Binomial model
+plot(perm.coef.zero[,1],type = "l", main = "Intercept", ylab = "Coefficient estimate", col = "lightblue")
+abline(h=real.coef.zero[1],col="#CD5C5C",lwd=3)
+plot(perm.coef.zero[,2],type = "l", main = "Vessel type", ylab = "Coefficient estimate", col = "lightblue")
+abline(h=real.coef.zero[2],col="#CD5C5C",lwd=3)
+plot(perm.coef.zero[,3],type = "l", main = "Fishing association C member", ylab = "Coefficient estimate", col = "lightblue")
+abline(h=real.coef.zero[3],col="#CD5C5C",lwd=3)
+plot(perm.coef.zero[,4],type = "l", main = "Cooperative member", ylab = "Coefficient estimate", col = "lightblue")
+abline(h=real.coef.zero[4],col="#CD5C5C",lwd=3)
+plot(perm.coef.zero[,5],type = "l", main = "Age", ylab = "Coefficient estimate", col = "lightblue")
+abline(h=real.coef.zero[5],col="#CD5C5C",lwd=3)
+
+dev.off()
+
+
+################################################################################################
+####                          Exploring the other networks                                  ####
+################################################################################################
+
+## Vessel technology and maintenance
+## Have a look at the distribution of the data
+hist(resp.inds.info$tech_wdeg.in)
+table(resp.inds.info$tech_wdeg.in)
+
+## Check out zero-inflation
+100*sum(resp.inds.info$tech_wdeg.in == 0)/nrow(resp.inds.info)
+## 32.7% of the in-degree are zeros
+## Definite zero inflation present, though lower than  the sea turtle networks 40.6% for in-deg.
+
+## What about for node eccentricity?
+hist(resp.inds.info$tech_eccent)
+table(resp.inds.info$tech_eccent)
+100*sum(resp.inds.info$tech_eccent == 0)/nrow(resp.inds.info)
+## 32.7% of the node eccentricity values are zeros
+
+## First have a quick look at what's significant across all the predictors - back selection
+## This is the backward selection model at a 0.10 threshold
+technet.indeg.back <- hurdle(tech_wdeg.in ~ as.factor(vessel_type) +
+                         as.factor(aware_of_technologies_being_introduced) +
+                         as.numeric(HH_number)   |
+                         as.factor(vessel_type) +
+                         as.factor(aware_of_technologies_being_introduced) +
+                         as.numeric(HH_number),
+                       data=resp.inds.info,
+                       dist = "negbin",
+                       zero.dist = "negbin",
+                       link = "logit")
+
+summary(technet.indeg.back)
+
+# Check the model fit with  residuals
+res <- resid(technet.indeg.back)
+plot(fitted(technet.indeg.back), res)
+
+## Create Q-Q plot for residuals
+qqnorm(res)
+## Add a straight diagonal line to the plot
+qqline(res)
+
+## have a look at density plot of the residuals
+plot(density(res))
+
+## Check for over dispersion...
+DISPP <- (sum(residuals(technet.indeg.back, type = "pearson")^2))/technet.indeg.back$df.residual
+DISPP
+
+## Dispersion stat is 1.11....
+
+## Have a look at the fit with a Rootogram
+technet.indeg.back.root <- rootogram(technet.indeg.back, main = "in-degree negbin hurdle backward tech", bins = 10, fill = "grey",ylim = c(-2, 9), max = 11, xlab = "In-degree for vessel technology and maintenance", ylab = "sqrt (Frequency)")
+
+AIC.backward<- AIC(technet.indeg.back)
+BIC.backward <- BIC(technet.indeg.back)
+AIC.backward
+BIC.backward
+
+## Having checked, the negative binomial hurdle is a better fit than the poisson hurdle here. 
+
+## Forward selection with 0.1 threshold. 
+## start with aware of tech, 
+technet.indeg <- hurdle(turtle_wdeg.in ~ as.factor(aware_of_technologies_being_introduced)  + 
+                          as.factor(vessel_type) +
+                          as.numeric(yrs_fishing) |
+                          as.factor(aware_of_technologies_being_introduced) + 
+                          as.factor(vessel_type) + 
+                          as.numeric(yrs_fishing) ,
+                        data=resp.inds.info,
+                        dist = "negbin",
+                        zero.dist = "negbin",
+                        link = "logit")
+
+summary(technet.indeg)
+
+################################################################################################
+####                          Visualising results for paper                                 ####
+################################################################################################
+
+## Dot-and-whisker plots showing estimates and confidence intervals
+## Exponentiated non-bootstrapped version. But can also do it with exponentiated coefficients
+library(see)
+library(parameters)
+result <- model_parameters(h.indeg.forward, exponentiate = FALSE)
+h.indeg.forward.ex.plot <-plot(result, show_labels = FALSE, size_text = 4)+
+  ggplot2::scale_y_discrete(labels=c("count_(Intercept)" = "Intercept", 
+                                     "count_as.factor(aware_of_technologies_being_introduced)1" = "Aware of mitigation technologies [yes]", 
+                                     "count_as.factor(positive_bycatch_reduction)1" = "Positive bycatch reduction [yes]",
+                                     "count_as.factor(vessel_type)1" = "Vessel type [large]",
+                                     "count_as.factor(prodelphinus_cooperative_member)1" = "Cooperative participant [yes]",
+                                     "count_as.numeric(skip_age)" = "Age",
+                                     "zero_(Intercept)" = "Intercept", 
+                                     "zero_as.factor(aware_of_technologies_being_introduced)1" = "Aware of mitigation technologies [yes]", 
+                                     "zero_as.factor(positive_bycatch_reduction)1" = "Positive bycatch reduction [yes]",
+                                     "zero_as.factor(vessel_type)1" = "Vessel type [large]",
+                                     "zero_as.factor(prodelphinus_cooperative_member)1" = "Cooperative participant [yes]",
+                                     "zero_as.numeric(skip_age)" = "Age")) +
+  theme(axis.text=element_text(size=22),
+        axis.title=element_text(size=22),
+        text = element_text(size=22))
+
+
+## Save out a single version in case I was to split the figure later on
+quartz.save(h.indeg.forward.plot,  file = "in-degree_hurdle_coefficient.tiff",type = "tiff", device = dev.cur(), dpi = 600, width = 12, height = 12)
+
+## Here is the plot for the node eccentricity hurdle model
+h.eccent.forward.plot <- plot(parameters(h.eccent.forward1)) +
+  ggplot2::scale_y_discrete(labels=c("count_(Intercept)" = "Intercept",
+                                     "count_as.factor(vessel_type)1" = "Vessel type [large]",
+                                     "count_as.factor(Gremio_ADC)1" = "Member of fishing association C [yes]",
+                                     "count_as.factor(prodelphinus_cooperative_member)1" = "Cooperative participant [yes]",
+                                     "count_as.numeric(skip_age)" = "Age",
+                                     "zero_(Intercept)" = "Intercept", 
+                                     "zero_as.factor(vessel_type)1" = "Vessel type [large]",
+                                     "zero_as.factor(Gremio_ADC)1" = "Member of fishing association C [yes]",
+                                     "zero_as.factor(prodelphinus_cooperative_member)1" = "Cooperative participant [yes]",
+                                     "zero_as.numeric(skip_age)" = "Age")) +
+  theme(axis.text=element_text(size=22),
+        axis.title=element_text(size=22),
+        text = element_text(size=22))
+
+
+## Here I am combining both plots and labelling them
+hurdle.coefficient.plot.both <- plots(h.indeg.forward.ex.plot, h.eccent.forward.plot, n_rows = 2, tags = c("a", "b")) &
+  theme(plot.tag = element_text(size = 24))
+
+## Save out the plot
+quartz.save(hurdle.coefficient.plot.both,  file = "hurdle_coefficient_plot_both.tiff",type = "tiff", device = dev.cur(), dpi = 600, width = 10, height = 19)
+
+
+
+
+
+
+
+
+## this code still needs to be tidied up... 
+
+resp.inds.info$prodelphinus_cooperative_member.f <- as.factor(resp.inds.info$prodelphinus_cooperative_member)
+resp.inds.info$prodelphinus_cooperative_member.f <- relevel(resp.inds.info$prodelphinus_cooperative_member.f, "1")
+levels(resp.inds.info$prodelphinus_cooperative_member.f)
+
+resp.inds.info$positive_bycatch_reduction.f <- as.factor(resp.inds.info$positive_bycatch_reduction)
+resp.inds.info$positive_bycatch_reduction.f <- relevel(resp.inds.info$positive_bycatch_reduction.f, "1")
+levels(resp.inds.info$positive_bycatch_reduction.f)
+
+
+mod1<-lm(turtle_wdeg.in~as.numeric(skip_age)+
+           vessel_type+
+           captain_owner+
+           # as.numeric(sj_fisher_gen)+
+           # as.numeric(number_boats_owned)+
+           # linear_net+
+           # surface_net+
+           # Gremio_board_member +
+           Gremio_president +
+           # Completed_SS +
+           # Completed_PS +
+           positive_bycatch_reduction.f +
+           aware_of_prodelphinus +
+           # aware_of_technologies_being_introduced+
+           prodelphinus_cooperative_member.f,
+         data=resp.inds.info)
+
+summary(mod1)
+
+#Yrs fishing is slightly more significant that age
+mod1<-lm(turtle_wdeg.in~as.numeric(skip_age)+
+           vessel_type+
+           captain_owner+
+           positive_bycatch_reduction.f+
+           aware_of_technologies_being_introduced+
+           prodelphinus_cooperative_member.f,
+         data=resp.inds.info)
+
+summary(mod1)
+
+resp.inds.info.c <- resp.inds.info[ which(resp.inds.info$vessel_type=='1'), ]
+resp.inds.info.l <- resp.inds.info[ which(resp.inds.info$vessel_type=='2'), ]
+
+
+panel.df <- resp.inds.info %>%
+  subset(select=c(turtle_wdeg.in = turtle_wdeg.in,
+                  turtle_deg.in = turtle_deg.in,
+                  turtle_wdeg.out = turtle_wdeg.out,
+                  turtle_deg.out = turtle_deg.out,
+                  turtle_eccent = turtle_eccent,
+                  vessel_type = vessel_type,
+                  perception_of_bycatch_reduction = perception_of_bycatch_reduction,
+                  positive_bycatch_reduction = positive_bycatch_reduction,
+                  aware_of_prodelphinus = aware_of_prodelphinus,
+                  aware_of_technologies_being_introduced = aware_of_technologies_being_introduced,
+                  prodelphinus_cooperative_member = prodelphinus_cooperative_member,
+                  captain_owner = captain_owner,
+                  Gremio_president = Gremio_president,
+                  Gremio = Gremio, 
+                  Gremio_ADA = Gremio_ADA,
+                  Gremio_ADC = Gremio_ADC,
+                  Gremio_SMUDP = Gremio_SMUDP,
+                  No_gremio = No_gremio,
+                  skip_age = skip_age,
+                  Mean_monthly_income_USD = Mean_monthly_income_USD,
+                  Completed_PS = Completed_PS,
+                  Gremio_board_member = Gremio_board_member,
+                  yrs_fishing = yrs_fishing))
+
+panel.df1 <- panel.df[ which(panel.df$vessel_type=='1'), ]
+panel.df2 <- panel.df[ which(panel.df$vessel_type=='-1'), ]
+
+dev.new(height=7.5,width=9);par(mar=c(0,0,1,0));par(mfrow=c(1,1))
+
+## Have a look at the difference between vessel type for in-degree
+p1 <- ggplot(panel.df, aes(x=vessel_type, 
+                           y=turtle_wdeg.in, 
+                           fill = vessel_type)) +
+  scale_x_discrete(breaks=c(1,0), labels=c("Inshore","Inshore-midwater")) +
+  geom_boxplot()+
+  labs(x="Vessel type", y = "In-degree") +
+  scale_fill_manual(values=alpha(c("white", "white"), 0.7)) +
+  theme_classic() + 
+  theme(legend.position = "none") +
+  theme(axis.title.x = element_text(vjust=-5), axis.title.y = element_text(vjust=5), 
+        plot.margin = margin(1.4, 1.4, 2, 1.4, "cm"), 
+        axis.text=element_text(size=36),
+        axis.title=element_text(size=36)) 
+
+p1
+# Colour for grey scheme if needed #E2E2E2
+
+
+p2 <- p1 + theme(strip.background = element_blank(),
+                 strip.text.y = element_blank(),
+                 strip.text.x = element_blank())
+p2 + geom_jitter(shape=16, size = 2, colour = "grey60", fill = "grey60", position=position_jitter(0.15)) +
+  stat_summary(fun = mean, geom="point", shape=23, size=8, colour = "black", fill = "black") 
+
+## Compare means and include signifcance on figure
+stat.test <- panel.df %>%
+  t_test(turtle_wdeg.in ~ vessel_type)
+stat.test
+
+##Save out 
+quartz.save(p2, file = "p3.png",type = "png", device = dev.cur(), dpi = 600, width = 12, height = 12)
+
+
+## Figure 1, Panel B. Show the significant attitude predictor of in-degree centrality
+panel.df$perception_of_bycatch_reduction <- factor(panel.df$perception_of_bycatch_reduction,levels = c("1", "0", "-1"))
+panel.df1$perception_of_bycatch_reduction <- factor(panel.df1$perception_of_bycatch_reduction,levels = c("1", "0", "-1"))
+panel.df2$perception_of_bycatch_reduction <- factor(panel.df2$perception_of_bycatch_reduction,levels = c("1", "0", "-1"))
+
+panel.df$perception_of_bycatch_reduction <- factor(panel.df$perception_of_bycatch_reduction , levels=c("-1", "0", "1"))
+
+
+q1 <- ggplot(panel.df, aes(x=perception_of_bycatch_reduction, 
+                           y=turtle_wdeg.in, 
+                           fill = interaction(perception_of_bycatch_reduction))) +
+  scale_x_discrete(breaks=c(1,0,-1), labels=c("+","0","-")) +
+  geom_boxplot()+
+  labs(x="Attitude towards joining cooperative in future", y = "In-degree") +
+  scale_fill_manual(values=alpha(c("#D36F3F", "#D7EEEF", "#98B5C9"), 0.8)) +
+  theme_classic() + 
+  theme(legend.position = "none") +
+  theme(axis.title.x = element_text(vjust=-5), axis.title.y = element_text(vjust=5), 
+        plot.margin = margin(1.4, 1.4, 2, 1.4, "cm"), 
+        axis.text=element_text(size=36),
+        axis.title=element_text(size=36)) 
+
+q1
+
+
+## Doesn't come out as significant
+compare_means(turtle_wdeg.in ~ positive_bycatch_reduction, data = panel.df)
+
+## Add inidividual values to the boxplot
+q2 <- q1 + theme(strip.background = element_blank(),
+                 strip.text.y = element_blank(),
+                 strip.text.x = element_blank())
+q2
+
+# # Box plot with dot plot
+q2 + geom_dotplot(binaxis='y', stackdir='center', dotsize=0.1)
+# Box plot with jittered points
+# 0.2 : degree of jitter in x direction
+q2 + geom_jitter(shape=16, size = 2, colour = "grey60", fill = "grey60", position=position_jitter(0.15), alpha =0.7) +
+  stat_summary(fun = mean, geom="point", shape=23, size=8, colour = "black", fill = "black") 
+
+
+##Save out Panel B to Figure 1 illustrator file
+quartz.save(q2, file = "q3.png",type = "png", device = dev.cur(), dpi = 600, width = 12, height = 12)
+
+
+## Figure 2, Panel C
+p3 <- ggplot(panel.df, aes(x=prodelphinus_cooperative_member, 
+                           y=turtle_wdeg.in, 
+                           fill = prodelphinus_cooperative_member)) +
+  scale_x_discrete(breaks=c(1,0), labels=c("Yes","No")) +
+  geom_boxplot()+
+  labs(x="Cooperative member", y = "In-degree") +
+  scale_fill_manual(values=alpha(c("#98B5C9", "#184D89"), 0.8)) +
+  theme_classic() + 
+  theme(legend.position = "none") +
+  theme(axis.title.x = element_text(vjust=-5), axis.title.y = element_text(vjust=5), 
+        plot.margin = margin(1.4, 1.4, 2, 1.4, "cm"), 
+        axis.text=element_text(size=36),
+        axis.title=element_text(size=36)) 
+
+p3
+
+
+p4 <- p3 + theme(strip.background = element_blank(),
+                 strip.text.y = element_blank(),
+                 strip.text.x = element_blank())
+p4 + geom_jitter(shape=16, size = 2, colour = "grey60", fill = "grey60", position=position_jitter(0.15), alpha = 0.7) +
+  stat_summary(fun = mean, geom="point", shape=23, size=8, colour = "black", fill = "black") 
+
+## Compare means and include signifcance on figure
+stat.test <- panel.df %>%
+  t_test(turtle_wdeg.in ~ prodelphinus_cooperative_member)
+stat.test
+
+
+##Save out Panel C to Figure 2 illustrator file
+quartz.save(p4, file = "Fig2C.png",type = "png", device = dev.cur(), dpi = 600, width = 12, height = 12)
+
+
+
+## Figure 2, Panel D
+t3 <- ggplot(panel.df, aes(x=aware_of_technologies_being_introduced, 
+                           y=turtle_wdeg.in, 
+                           fill = aware_of_technologies_being_introduced)) +
+  scale_x_discrete(breaks=c(1,0), labels=c("Yes","No")) +
+  geom_boxplot()+
+  labs(x="Aware of new mitigation technologies", y = "In-degree") +
+  scale_fill_manual(values=alpha(c("#000000", "#FF0000"), 0.7)) +
+  theme_classic() + 
+  theme(legend.position = "none") +
+  theme(axis.title.x = element_text(vjust=-5), axis.title.y = element_text(vjust=5), 
+        plot.margin = margin(1.4, 1.4, 2, 1.4, "cm"), 
+        axis.text=element_text(size=36),
+        axis.title=element_text(size=36)) 
+
+t3
+
+
+t4 <- t3 + theme(strip.background = element_blank(),
+                 strip.text.y = element_blank(),
+                 strip.text.x = element_blank())
+t4 + geom_jitter(shape=16, size = 2, colour = "grey60", fill = "grey60", position=position_jitter(0.15), alpha = 0.6) +
+  stat_summary(fun = mean, geom="point", shape=23, size=8, colour = "black", fill = "black") 
+
+## Compare means and include signifcance on figure
+stat.test <- panel.df %>%
+  t_test(turtle_wdeg.in ~ aware_of_technologies_being_introduced)
+stat.test
+
+##Save out Panel D to Figure 2 illustrator file
+quartz.save(t4, file = "Fig2D.png",type = "png", device = dev.cur(), dpi = 600, width = 12, height = 12)
+
+
+
+
+## Figure 2, Panel B. Vessel type for node eccentricty
+c1 <- ggplot(panel.df, aes(x=vessel_type, 
+                           y=turtle_eccent, 
+                           fill = vessel_type)) +
+  scale_x_discrete(breaks=c(1,0), labels=c("Inshore","Inshore-midwater")) +
+  geom_boxplot()+
+  labs(x="Vessel type", y = "Node eccentricity") +
+  scale_fill_manual(values=alpha(c("white", "white"), 0.7)) +
+  theme_classic() + 
+  theme(legend.position = "none") +
+  theme(axis.title.x = element_text(vjust=-5), axis.title.y = element_text(vjust=5), 
+        plot.margin = margin(1.4, 1.4, 2, 1.4, "cm"), 
+        axis.text=element_text(size=36),
+        axis.title=element_text(size=36)) 
+
+c1
+
+
+
+c2 <- c1 + theme(strip.background = element_blank(),
+                 strip.text.y = element_blank(),
+                 strip.text.x = element_blank())
+c2 + geom_jitter(shape=16, size = 2, colour = "grey60", fill = "grey60", position=position_jitter(0.15)) +
+  stat_summary(fun = mean, geom="point", shape=23, size=8, colour = "black", fill = "black") 
+
+## Compare means and include signifcance on figure
+stat.test <- panel.df %>%
+  t_test(turtle_wdeg.in ~ vessel_type)
+stat.test
+
+##Save out 
+quartz.save(c2, file = "Fig2_panelB_vessel_node_eccent.png",type = "png", device = dev.cur(), dpi = 600, width = 12, height = 12)
+
+## Figure 2, Panel C. Gremio ADC and node eccentricty
+c1 <- ggplot(panel.df, aes(x=Gremio_ADC, 
+                           y=turtle_eccent, 
+                           fill = Gremio_ADC)) +
+  scale_x_discrete(breaks=c(1,0), labels=c("Yes","No")) +
+  geom_boxplot()+
+  labs(x="Fishing association C membership", y = "Node eccentricity") +
+  scale_fill_manual(values=alpha(c("#DAD1CA", "#E0A276"), 0.7)) +
+  theme_classic() + 
+  theme(legend.position = "none") +
+  theme(axis.title.x = element_text(vjust=-5), axis.title.y = element_text(vjust=5), 
+        plot.margin = margin(1.4, 1.4, 2, 1.4, "cm"), 
+        axis.text=element_text(size=36),
+        axis.title=element_text(size=36)) 
+
+c1
+
+
+
+c2 <- c1 + theme(strip.background = element_blank(),
+                 strip.text.y = element_blank(),
+                 strip.text.x = element_blank())
+c2 + geom_jitter(shape=16, size = 2, colour = "grey60", fill = "grey60", position=position_jitter(0.15)) +
+  stat_summary(fun = mean, geom="point", shape=23, size=8, colour = "black", fill = "black") 
+
+## Compare means and include signifcance on figure
+stat.test <- panel.df %>%
+  t_test(turtle_wdeg.in ~ vessel_type)
+stat.test
+
+##Save out 
+quartz.save(c2, file = "Fig2_PanelC_Gremio_ADC_eccentricity.png",type = "png", device = dev.cur(), dpi = 600, width = 12, height = 12)
+
+# ## Figure 1, Panel B. Plot fishing experience against node eccentricity
+# age_eccent <- resp.inds.info %>%
+#   subset(select=c(turtle_wdeg.in = turtle_wdeg.in,
+#                   turtle_eccent = turtle_eccent,
+#                   yrs_fishing = yrs_fishing,
+#                   vessel_type = vessel_type,
+#                   perception_of_bycatch_reduction = perception_of_bycatch_reduction,
+#                   Mean_monthly_income_USD = Mean_monthly_income_USD,
+#                   positive_bycatch_reduction = positive_bycatch_reduction,
+#                   aware_of_technologies_being_introduced = aware_of_technologies_being_introduced))
+# 
+# age_eccent$vessel_type <- as.numeric(age_eccent$vessel_type)
+# age_eccent$vessel_type[age_eccent$vessel_type == -1] <- 0
+# age_eccent$vessel_type[age_eccent$vessel_type == 2] <- 0
+# age_eccent$vessel_type <- as.factor(age_eccent$vessel_type)
+# table(age_eccent$vessel_type)
+# typeof(age_eccent$vessel_typ)
+# 
+# age_eccent$aware_of_technologies_being_introduced <- as.factor(age_eccent$aware_of_technologies_being_introduced)
+# age_eccent$positive_bycatch_reduction <- as.factor(age_eccent$positive_bycatch_reduction)
+# age_eccent$Mean_monthly_income_USD <- as.numeric(age_eccent$Mean_monthly_income_USD)
+# age_eccent$turtle_eccent <- as.numeric(age_eccent$turtle_eccent)
+# 
+# age_eccent$yrs_fishing <- as.numeric(age_eccent$yrs_fishing)
+# age_eccent$turtle_eccent <- as.numeric(age_eccent$turtle_eccent)
+# 
+# ## Plot the figure 
+# y1 <- ggplot(age_eccent, aes(x=yrs_fishing,y=turtle_eccent, fill = vessel_type)) +
+#   geom_smooth(method="loess", span=5, se=TRUE, alpha=0.4, aes(colour = vessel_type)) +
+#   labs(x="Years fishing experience", y = "Node eccentricity") +
+#   theme_classic() 
+# y1
+# y1 + scale_fill_manual(name = "Vessel type", labels = c("Small inshore", "Large midwater"),values=c("#009A6D", "#E06CA4")) +
+#   scale_colour_manual(name = "Vessel type", labels = c("Small inshore", "Large midwater"),values=c("#009A6D", "#E06CA4")) +
+#   theme(legend.text=element_text(size=33.5),
+#         legend.position = c(.5, -.25),
+#         legend.direction = "horizontal",
+#         legend.title = element_text(size=33.5, vjust = .5, hjust = .1),
+#         plot.margin = unit(c(1,1,4,2), "cm"),
+#         axis.text=element_text(size=33.5),
+#         axis.title=element_text(size=33.5),
+#         axis.title.x = element_text(vjust=-5),
+#         axis.title.y = element_text(vjust=4.4))
+# 
+# #A7BDD2", "#3E52A0"
+# 
+# ##Save out Panel B to Figure 1 illustrator file
+# quartz.save(y1, file = "Eccent_Experience_Vessel.png",type = "png", device = dev.cur(), dpi = 600, width = 12, height = 12)
+
+
+
+
+## Plot the figure 
+q1 <- ggplot(age_eccent, aes(x=yrs_fishing,y=turtle_eccent, fill = aware_of_technologies_being_introduced)) +
+  geom_smooth(method="loess", span=5, se=TRUE, alpha=0.4, aes(colour = aware_of_technologies_being_introduced)) +
+  labs(x="Years fishing experience", y = "Node eccentricity") +
+  theme_classic() 
+q1  +  scale_fill_manual(name = "Mitigation tech (LEDs)",labels = c("Unaware", "Aware"), values=c("#F1A384", "#005598")) +
+  scale_colour_manual(name = "Mitigation tech (LEDs)",labels = c("Unaware", "Aware"), values=c("#F1A384", "#005598")) +
+  theme(legend.text=element_text(size=35),
+        legend.position = c(.5, -.25),
+        legend.direction = "horizontal",
+        legend.title = element_text(size=35, vjust = .5, hjust = .1),
+        plot.margin = unit(c(1,2,4,2), "cm"),
+        axis.text=element_text(size=35),
+        axis.title=element_text(size=35),
+        axis.title.x = element_text(vjust=-5),
+        axis.title.y = element_text(vjust=6.5))
+  
+##Save out Panel B to Figure 1 illustrator file
+quartz.save(q1, file = "Eccent_experience_technology_awareness.png",type = "png", device = dev.cur(), dpi = 600, width = 12, height = 12)
+
+
+## Mean monthly income
+y1 <- ggplot(age_eccent, aes(x=Mean_monthly_income_USD,y=turtle_eccent, fill = vessel_type)) +
+  geom_smooth(method="loess", span=5, se=TRUE, alpha=0.3, aes(colour = vessel_type)) +
+  labs(x="Mean monthly income (USD)", y = "Node eccentricity") +
+  theme_classic() 
+y1 + theme(legend.position="none")
+
+
+
+### Perception 
+y1 <- ggplot(panel.df, aes(x=perception_of_bycatch_reduction, 
+                           y=turtle_eccent, 
+                           fill = interaction(perception_of_bycatch_reduction))) +
+  scale_x_discrete(breaks=c(1,0,-1), labels=c("+","0","-")) +
+  geom_boxplot()+
+  labs(x="Attitude towards joining cooperative in future", y = "In-degree") +
+  scale_fill_manual(values=alpha(c("#D36F3F", "#D7EEEF", "#98B5C9"), 0.8)) +
+  theme_classic() + 
+  theme(legend.position = "none") +
+  theme(axis.title.x = element_text(vjust=-5), axis.title.y = element_text(vjust=5), 
+        plot.margin = margin(1.4, 1.4, 2, 1.4, "cm"), 
+        axis.text=element_text(size=36),
+        axis.title=element_text(size=36)) 
+
+y1
+
+
+## Doesn't come out as significant
+compare_means(turtle_eccent ~ positive_bycatch_reduction, data = panel.df)
+
+## Add inidividual values to the boxplot
+y2 <- y1 + theme(strip.background = element_blank(),
+                 strip.text.y = element_blank(),
+                 strip.text.x = element_blank())
+y2
+
+# # Box plot with dot plot
+y2 + geom_dotplot(binaxis='y', stackdir='center', dotsize=0.1)
+# Box plot with jittered points
+# 0.2 : degree of jitter in x direction
+y2 + geom_jitter(shape=16, size = 2, colour = "grey60", fill = "grey60", position=position_jitter(0.15), alpha =0.7) +
+  stat_summary(fun = mean, geom="point", shape=23, size=8, colour = "black", fill = "black") 
+
+
+##Save out Panel B to Figure 1 illustrator file
+quartz.save(y2, file = "perception_node_eccentricity.png",type = "png", device = dev.cur(), dpi = 600, width = 12, height = 12)
+
+
+## Figure 2, panel D, Node eccentricity and cooperative memebership
+g3 <- ggplot(panel.df, aes(x=prodelphinus_cooperative_member, 
+                            y=turtle_eccent, 
+                            fill = prodelphinus_cooperative_member)) +
+  scale_x_discrete(breaks=c(1,0), labels=c("Yes","No")) +
+  geom_boxplot() +
+  labs(x="Cooperative participation", y = "Node eccentricity") +
+  scale_fill_manual(values=alpha(c("#000000", "#FF0000"), 0.7)) +
+  theme_classic() + 
+  theme(legend.position = "none") +
+  theme(axis.title.x = element_text(vjust=-5), axis.title.y = element_text(vjust=5), 
+        plot.margin = margin(1.4, 1.4, 2, 1.4, "cm"), 
+        axis.text=element_text(size=36),
+        axis.title=element_text(size=36)) 
+
+g3
+
+
+g4 <- g3 + theme(strip.background = element_blank(),
+                 strip.text.y = element_blank(),
+                 strip.text.x = element_blank())
+g4 + geom_jitter(shape=16, size = 2, colour = "grey60", fill = "grey60", position=position_jitter(0.15), alpha = 0.6) +
+  stat_summary(fun = mean, geom="point", shape=23, size=8, colour = "black", fill = "black") 
+
+# ## Compare means and include signifcance on figure
+# stat.test <- panel.df %>%
+#   t_test(turtle_eccent ~ aware_of_technologies_being_introduced)
+# stat.test
+
+##Save out Panel D to Figure 2 illustrator file
+quartz.save(g4, file = "Fig2_Panel_D_eccent_vessel.png",type = "png", device = dev.cur(), dpi = 600, width = 12, height = 12)
+
+
+
+## Aware of technologies being introduced by node eccentricity
+wt1 <- ggplot(panel.df, aes(x=positive_bycatch_reduction, 
+                           y=turtle_eccent, 
+                           fill = interaction(positive_bycatch_reduction))) +
+  scale_x_discrete(breaks=c(1,-1), labels=c("Yes","No")) +
+  geom_violin()+
+  labs(x="Attitude towards joining cooperative in future", y = "In-degree") +
+  scale_fill_manual(values=alpha(c("#D36F3F", "#D7EEEF", "#98B5C9"), 0.8)) +
+  theme_classic() + 
+  theme(legend.position = "none") +
+  theme(axis.title.x = element_text(vjust=-5), axis.title.y = element_text(vjust=5), 
+        plot.margin = margin(1.4, 1.4, 2, 1.4, "cm"), 
+        axis.text=element_text(size=36),
+        axis.title=element_text(size=36)) 
+
+wt1
+
+
+wt2 <- wt1 + theme(strip.background = element_blank(),
+                 strip.text.y = element_blank(),
+                 strip.text.x = element_blank())
+wt2 + geom_jitter(shape=16, size = 2, colour = "grey60", fill = "grey60", position=position_jitter(0.15), alpha = 0.6) +
+  stat_summary(fun = mean, geom="point", shape=23, size=8, colour = "black", fill = "black") 
+
+## Compare means and include signifcance on figure
+stat.test <- panel.df %>%
+  t_test(turtle_eccent ~ prodelphinus_cooperative_member)
+stat.test
+
+##Save out Panel D to Figure 2 illustrator file
+quartz.save(g4, file = "technologies_awareness_node_eccent.png",type = "png", device = dev.cur(), dpi = 600, width = 12, height = 12)
+
+
+
+
+
+## Perhaps more interesting to visualise this with perception averages and a line plot?
+## Summarise the data
+panel.df.av <- panel.df %>%
+  group_by(vessel_type, perception_of_bycatch_reduction) %>%
+  summarise(turtle_wdeg.in.mean = mean(turtle_wdeg.in),
+            turtle_wdeg.in.sd = sd(turtle_wdeg.in),
+            turtle_wdeg.in.sd = stderr(turtle_wdeg.in))
+
+panel.df.av
+
+# ##Line plots for figure 1 panels B and C
+# # Change line colors and sizes
+# L2 <- ggplot(panel.df.av, aes(x=perception_of_bycatch_reduction, y=turtle_wdeg.in.mean, group=vessel_type)) +
+#   geom_line(aes(linetype=vessel_type, color=vessel_type, size=vessel_type))+
+#   geom_point(aes(color=vessel_type, size=vessel_type))+
+#   scale_linetype_manual(values=c("twodash", "dotted"))+
+#   scale_color_manual(values=c('#4272B8','#774923'))+
+#   scale_size_manual(values=c(1, 1.5))+
+#   labs(x="Perception of participating in bycatch reduction interventions", y = "In-degree") +
+#   theme_classic() +
+#   theme(legend.position="none") +
+#   geom_errorbar(aes(ymin=turtle_wdeg.in.mean-turtle_wdeg.in.sd, ymax=turtle_wdeg.in.mean+turtle_wdeg.in.sd), width=.2,
+#                 position=position_dodge(0.05))
+# L2
+
+
+
+# # Box plot with dot plot
+# p3 + geom_dotplot(binaxis='y', stackdir='center', dotsize=1)
+# # Box plot with jittered points
+# # 0.2 : degree of jitter in x direction
+# p3 + geom_jitter(shape=16, position=position_jitter(0.2))
+#
+
+### END
+
+## Here is Figure 1: Panel A - visualising significant factors for in-degree
+
+## Have a go at adding some attributes of interest from the regressions into the network figure
+## Pull out the sea turtle bycatch network and convert it to an adjacency graph
+set.seed(1989)
+am.u<-resp.just.infos[["nominee_bycatch_turtle_activity"]]
+am.i<-graph.adjacency(am.u,mode=("directed"),diag=F,weighted=T) #igraph - creates a graph for plotting
+
+## To understand the network size
+E(am.i) # network size by edges or links
+V(am.i) # network size by vertices or nodes
+## Initial plot of sea turtle bycatch data
+
+## Calculate the average distance across the network
+mean_distance(am.i, directed = T) #4.8 contacts on average across the network 
+## Calculate the centralisation
+centr_degree(am.i, mode = "in", normalized = T) # 5.1% centralised around one node
+## Calcuate the network density (of all posible ties how many ties are present)
+edge_density(am.i, loops = F) # 0.97% of possible ties are present
+## Calculate the degree centrality of each node
+degree(am.i)
+## Calculate the mean degree centrality
+mean(degree(am.i)) # 3.18
+
+
+## Add node attributes of interest to the network
+
+## Set vertex attributes of interest from the regressions
+am.i2 <- set_vertex_attr(am.i, "vessel", value = resp.inds.info$vessel_type)
+am.i3 <- set_vertex_attr(am.i2, "rsp", value = as.character(resp.inds.info$resp))
+am.i4 <- set_vertex_attr(am.i3, "TechAware", value = resp.inds.info$aware_of_technologies_being_introduced)
+am.i5 <- set_vertex_attr(am.i4, "coop", value = resp.inds.info$prodelphinus_cooperative_member)
+am.i6 <- set_vertex_attr(am.i5, "perception", value = resp.inds.info$perception_of_bycatch_reduction3)
+am.i7 <- set_vertex_attr(am.i6, "GremioADC", value = resp.inds.info$Gremio_ADC)
+am.i8 <- set_vertex_attr(am.i7, "President", value = resp.inds.info$Gremio_president)
+am.i9 <- set_vertex_attr(am.i8, "Age", value = resp.inds.info$skip_age)
+
+
+vertex_attr(am.i6)
+
+## set layout of the network
+m <- layout_nicely(am.i6) 
+
+## set text size of labelled vertices/nodes
+# V(am.i5)$label.cex = 0.4 
+
+## set colour of vertex attribute according to vessel type
+# V(am.i6)$color <- ifelse(V(am.i6)$vessel == 1, "dodgerblue", "tan4")
+# V(am.i6)$vertex.frame.color <- ifelse(V(am.i6)$prodelphinus == 1, "darkblue", "tan4")
+
+V(am.i6)$color <- ifelse(V(am.i6)$perception == 1, "#AAC2D5",
+                          ifelse(V(am.i6)$perception == 0, "#DEF7F8",
+                                 ifelse(V(am.i6)$perception == 3,"#DB8544","#2E609F")))
+
+## set shape of vertex attribute according to bycatch reduction cooperative members 
+V(am.i6)$shape <- ifelse(V(am.i6)$vessel == 1, "circle", "square")
+V(am.i6)$shape
+
+## set shape of vertex attribute according to bycatch reduction cooperative members 
+V(am.i6)$vertex.frame.color <- ifelse(V(am.i6)$TechAware == 0, "#000000", "#FF0000")
+
+## red C60000
+
+## Figure 1. Panel A. 
+## Here I am using Josh's code to set up an illustrative network to incorporate 
+## some node attributes of interest based on the regression analysis.
+
+# display.contexts<-c("Gear","Weather","Location","Activity","T. Bycatch", "Tech.", "Regs.","Finance","Capt.")
+# short.contexts<-short.names[4:12]
+# short.contexts.t1<-c("turtle",short.contexts[!short.contexts=="turtle"])
+# display.contexts.t1<-c("T. Bycatch",display.contexts[!display.contexts=="T. Bycatch"])
+
+colfunc<- colorRampPalette(c('grey','darkgreen'))
+
+circlay<-T #whether network should be circular
+any.lay<-T #whether all networks in loop should have the same layout
+
+##set the size of 
+dev.newr(height=7.5,width=7);par(mar=c(0,0,1,0));par(mfrow=c(1,1))
+
+am.u<-resp.just.infos[["nominee_bycatch_turtle_activity"]]
+am.i<-graph.adjacency(am.u,mode=("directed"),diag=F,weighted=T) #igraph - creates a graph for plotting
+
+any.am.u<-any.am[rownames(am.u),colnames(am.u)]
+any.am.i<-graph.adjacency(any.am.u,mode=("directed"),diag=F,weighted=T) #igraph
+
+
+if(!any.lay){ 
+  am.lay<-layout.fruchterman.reingold(am.i6)}
+
+if(any.lay){
+  am.lay<-layout.fruchterman.reingold(any.am.i)}
+
+if(circlay==T){ #whether to keep a circle layout
+  
+  ps<-nrow(am.lay)
+  dim.tl<-ceiling(sqrt(ps))*2 
+  xpoints1<-floor(-dim.tl/2):ceiling(dim.tl/2)
+  
+  xpoints2<-xpoints1+0.5
+  ypoints1<-xpoints1
+  ypoints2<-xpoints2
+  grid.lay1<-expand.grid(xpoints2,ypoints1)
+  grid.lay2<-expand.grid(xpoints1,ypoints2)
+  grid.lay3<-expand.grid(xpoints1,ypoints1)
+  grid.lay4<-expand.grid(xpoints2,ypoints2)
+  grid.lay<-rbind(grid.lay1,grid.lay2,grid.lay3,grid.lay4)
+  grid.lay[,1]<-jitter(grid.lay[,1],1)
+  grid.lay[,2]<-jitter(grid.lay[,2],1)
+  euc.dist <- function(x1, x2) sqrt(sum((x1 - x2) ^ 2))
+  grid.lay[,3]<-apply(grid.lay,1,function(a)euc.dist(matrix(c(mean(grid.lay[,1]),mean(grid.lay[,2])),1,2),a))
+  max.dist<-grid.lay[,3][true.rank(grid.lay[,3])==ps]
+  g.lay.c<-grid.lay[grid.lay[,3]<=max.dist,]
+  g.lay.c[,1]<-scale(g.lay.c[,1])[,1]
+  g.lay.c[,2]<-scale(g.lay.c[,2])[,1]
+  am.lay[,1]<-scale(am.lay[,1])[,1]
+  am.lay[,2]<-scale(am.lay[,2])[,1]
+  distances <- rdist(am.lay[,1:2],g.lay.c[,1:2]) 
+  sol <- solve_LSAP(t(distances))
+  am.lay[as.numeric(sol),1:2]<-as.matrix(g.lay.c[,1:2])
+  
+}
+
+##This changes the node size according to in (or out) degree 
+strengths.out<-strength(am.i6,mode="out")
+strengths.in<-strength(am.i6,mode="in")
+vert.sizes<-range01(rank(strengths.in))
+vert.sizes<-vert.sizes+0.3
+vert.sizes<-vert.sizes*6
+
+vert.cols<-rep("grey",length(vert.sizes))
+vert.cols<-as.character(range01(strengths.in))
+vert.cols<-colfunc(100)[range.use(rank(as.numeric(cut(as.numeric(strengths.in),breaks = 100))),1,100)]
+
+## Make blue nodes
+vert.shapes<-"circle"
+vert.cols.trans<-makeTrans(vert.cols)
+edge.cols<-makeTrans("darkblue")
+
+##This change the node colour according to a variable of choice
+# node.cols<-colfunc(100)[range.use(rank(as.numeric(cut(as.numeric(income.col),breaks = 100))),1,100)]
+
+
+##Can use this section of code to make grey links for any.am.i networks that can be
+##included underneath like in the SNA manuscript 1. 
+# edgew<-E(any.am.i)$weight
+# if(all(edgew %in% 0:1)){
+#   edgew<-1} else{
+#     edgew<-range.use(edgew,0.1,0.5)}
+# edge.cols<-"grey"
+# plot.igraph(any.am.i,layout=am.lay,vertex.size=vert.sizes,vertex.label=NA,edge.width=edgew,edge.color=edge.cols,vertex.frame.color=vert.cols.trans,vertex.color=vert.cols.trans,edge.curved=T,add=F,edge.arrow.size=0)
+
+#making grey links
+edgew<-E(am.i6)$weight
+if(all(edgew %in% 0:1)){
+  edgew<-1} else{
+    edgew<-range.use(edgew,0.1,0.5)}
+edge.cols<-makeTrans("grey50")
+
+
+# alpha.vec <- runif(200,0,1)
+
+## Save out figure
+indegree.network.plot <-  plot.igraph(am.i6,
+                            layout=am.lay,
+                            vertex.size=vert.sizes,
+                            vertex.label=NA,
+                            edge.width=edgew,
+                            edge.color=edge.cols,
+                            vertex.frame.color=V(am.i6)$vertex.frame.color,
+                            vertex.color = adjustcolor(V(am.i6)$color, alpha.f = .8), 
+                            vertex.shape=V(am.i6)$shape,
+                            vert.cols.trans=vert.cols.trans, 
+                            edge.arrow.width=1.4,
+                            edge.arrow.size=0.25,
+                            edge.curved=T)
+
+quartz.save(indegree.network.plot,  file = "Panel_A.tiff",type = "tiff", device = dev.cur(), dpi = 600, width = 18, height = 18)
+
+
+
+## Here is Figure 2: Panel A - visualising significant factors for node eccentricity
+
+## Have a go at adding some attributes of interest from the regressions into the network figure
+## Pull out the sea turtle bycatch network and convert it to an adjacency graph
+set.seed(1986)
+am.u<-resp.just.infos[["nominee_bycatch_turtle_activity"]]
+am.i<-graph.adjacency(am.u,mode=("directed"),diag=F,weighted=T) #igraph - creates a graph for plotting
+
+## To understand the network size
+E(am.i) # network size by edges or links
+V(am.i) # network size by vertices or nodes
+## Initial plot of sea turtle bycatch data
+
+## Calculate the average distance across the network
+mean_distance(am.i, directed = T) #4.8 contacts on average across the network 
+## Calculate the centralisation
+centr_degree(am.i, mode = "in", normalized = T) # 5.1% centralised around one node
+## Calcuate the network density (of all posible ties how many ties are present)
+edge_density(am.i, loops = F) # 0.97% of possible ties are present
+## Calculate the degree centrality of each node
+degree(am.i)
+## Calculate the mean degree centrality
+mean(degree(am.i)) # 3.18
+
+
+## Add node attributes of interest to the network
+
+## Set vertex attributes of interest from the regressions
+am.i2 <- set_vertex_attr(am.i, "vessel", value = resp.inds.info$vessel_type)
+am.i3 <- set_vertex_attr(am.i2, "rsp", value = as.character(resp.inds.info$resp))
+am.i4 <- set_vertex_attr(am.i3, "TechAware", value = resp.inds.info$aware_of_technologies_being_introduced)
+am.i5 <- set_vertex_attr(am.i4, "coop", value = resp.inds.info$prodelphinus_cooperative_member)
+am.i6 <- set_vertex_attr(am.i5, "perception", value = resp.inds.info$perception_of_bycatch_reduction3)
+am.i7 <- set_vertex_attr(am.i6, "GremioADC", value = resp.inds.info$Gremio_ADC)
+am.i8 <- set_vertex_attr(am.i7, "President", value = resp.inds.info$Gremio_president)
+am.i9 <- set_vertex_attr(am.i8, "Age", value = resp.inds.info$skip_age)
+
+
+vertex_attr(am.i6)
+
+## set layout of the network
+m <- layout_nicely(am.i6) 
+
+## set text size of labelled vertices/nodes
+# V(am.i5)$label.cex = 0.4 
+
+## set colour of vertex attribute according to vessel type
+# V(am.i6)$color <- ifelse(V(am.i6)$vessel == 1, "dodgerblue", "tan4")
+# V(am.i6)$vertex.frame.color <- ifelse(V(am.i6)$prodelphinus == 1, "darkblue", "tan4")
+
+# V(am.i6)$color <- ifelse(V(am.i6)$perception == 1, "#AAC2D5", 
+#                           ifelse(V(am.i6)$perception == 0, "#DEF7F8",
+#                                  ifelse(V(am.i6)$perception == 3,"#DB8544","#2E609F")))
+V(am.i6)$color <- ifelse(V(am.i7)$GremioADC == 1, "#DAD1CA", "#E0A276")
+
+# "#F1A384", "#005598" - original colour scheme
+
+
+## set shape of vertex attribute according to bycatch reduction cooperative members 
+V(am.i6)$shape <- ifelse(V(am.i6)$vessel == 1, "circle", "square")
+V(am.i6)$shape
+
+## set shape of vertex attribute according to bycatch reduction cooperative members 
+V(am.i6)$vertex.frame.color <- ifelse(V(am.i6)$coop == 1, "#FF0000", "#000000")
+
+## red C60000
+
+## Figure 1. Panel A. 
+## Here I am using Josh's code to set up an illustrative network to incorporate 
+## some node attributes of interest based on the regression analysis.
+
+# display.contexts<-c("Gear","Weather","Location","Activity","T. Bycatch", "Tech.", "Regs.","Finance","Capt.")
+# short.contexts<-short.names[4:12]
+# short.contexts.t1<-c("turtle",short.contexts[!short.contexts=="turtle"])
+# display.contexts.t1<-c("T. Bycatch",display.contexts[!display.contexts=="T. Bycatch"])
+
+colfunc<- colorRampPalette(c('grey','darkgreen'))
+
+circlay<-T #whether network should be circular
+any.lay<-T #whether all networks in loop should have the same layout
+
+##set the size of 
+dev.newr(height=7.5,width=7);par(mar=c(0,0,1,0));par(mfrow=c(1,1))
+
+am.u<-resp.just.infos[["nominee_bycatch_turtle_activity"]]
+am.i<-graph.adjacency(am.u,mode=("directed"),diag=F,weighted=T) #igraph - creates a graph for plotting
+
+any.am.u<-any.am[rownames(am.u),colnames(am.u)]
+any.am.i<-graph.adjacency(any.am.u,mode=("directed"),diag=F,weighted=T) #igraph
+
+
+if(!any.lay){ 
+  am.lay<-layout.fruchterman.reingold(am.i6)}
+
+if(any.lay){
+  am.lay<-layout.fruchterman.reingold(any.am.i)}
+
+if(circlay==T){ #whether to keep a circle layout
+  
+  ps<-nrow(am.lay)
+  dim.tl<-ceiling(sqrt(ps))*2 
+  xpoints1<-floor(-dim.tl/2):ceiling(dim.tl/2)
+  
+  xpoints2<-xpoints1+0.5
+  ypoints1<-xpoints1
+  ypoints2<-xpoints2
+  grid.lay1<-expand.grid(xpoints2,ypoints1)
+  grid.lay2<-expand.grid(xpoints1,ypoints2)
+  grid.lay3<-expand.grid(xpoints1,ypoints1)
+  grid.lay4<-expand.grid(xpoints2,ypoints2)
+  grid.lay<-rbind(grid.lay1,grid.lay2,grid.lay3,grid.lay4)
+  grid.lay[,1]<-jitter(grid.lay[,1],1)
+  grid.lay[,2]<-jitter(grid.lay[,2],1)
+  euc.dist <- function(x1, x2) sqrt(sum((x1 - x2) ^ 2))
+  grid.lay[,3]<-apply(grid.lay,1,function(a)euc.dist(matrix(c(mean(grid.lay[,1]),mean(grid.lay[,2])),1,2),a))
+  max.dist<-grid.lay[,3][true.rank(grid.lay[,3])==ps]
+  g.lay.c<-grid.lay[grid.lay[,3]<=max.dist,]
+  g.lay.c[,1]<-scale(g.lay.c[,1])[,1]
+  g.lay.c[,2]<-scale(g.lay.c[,2])[,1]
+  am.lay[,1]<-scale(am.lay[,1])[,1]
+  am.lay[,2]<-scale(am.lay[,2])[,1]
+  distances <- rdist(am.lay[,1:2],g.lay.c[,1:2]) 
+  sol <- solve_LSAP(t(distances))
+  am.lay[as.numeric(sol),1:2]<-as.matrix(g.lay.c[,1:2])
+  
+}
+
+##This changes the node size according to in (or out) degree 
+strengths.out<-strength(am.i6,mode="out")
+strengths.in<-strength(am.i6,mode="in")
+vert.sizes<-range01(rank(strengths.in))
+vert.sizes<-vert.sizes+0.3
+vert.sizes<-vert.sizes*6
+
+vert.cols<-rep("grey",length(vert.sizes))
+vert.cols<-as.character(range01(strengths.in))
+vert.cols<-colfunc(100)[range.use(rank(as.numeric(cut(as.numeric(strengths.in),breaks = 100))),1,100)]
+
+## Make blue nodes
+vert.shapes<-"circle"
+vert.cols.trans<-makeTrans(vert.cols)
+edge.cols<-makeTrans("darkblue")
+
+##This change the node colour according to a variable of choice
+# node.cols<-colfunc(100)[range.use(rank(as.numeric(cut(as.numeric(income.col),breaks = 100))),1,100)]
+
+
+##Can use this section of code to make grey links for any.am.i networks that can be
+##included underneath like in the SNA manuscript 1. 
+# edgew<-E(any.am.i)$weight
+# if(all(edgew %in% 0:1)){
+#   edgew<-1} else{
+#     edgew<-range.use(edgew,0.1,0.5)}
+# edge.cols<-"grey"
+# plot.igraph(any.am.i,layout=am.lay,vertex.size=vert.sizes,vertex.label=NA,edge.width=edgew,edge.color=edge.cols,vertex.frame.color=vert.cols.trans,vertex.color=vert.cols.trans,edge.curved=T,add=F,edge.arrow.size=0)
+
+#making grey links
+edgew<-E(am.i7)$weight
+if(all(edgew %in% 0:1)){
+  edgew<-1} else{
+    edgew<-range.use(edgew,0.1,0.5)}
+edge.cols<-makeTrans("grey50")
+
+
+# alpha.vec <- runif(200,0,1)
+
+## Save out figure
+eccent.plot <-  plot.igraph(am.i6,
+                      layout=am.lay,
+                      vertex.size=vert.sizes,
+                      vertex.label=NA,
+                      edge.width=edgew,
+                      edge.color=edge.cols,
+                      vertex.frame.color=V(am.i6)$vertex.frame.color,
+                      vertex.color = adjustcolor(V(am.i6)$color, alpha.f = .8), 
+                      vertex.shape=V(am.i6)$shape,
+                      vert.cols.trans=vert.cols.trans, 
+                      edge.arrow.width=1.4,
+                      edge.arrow.size=0.25,
+                      edge.curved=T)
+
+quartz.save(eccent.plot,  file = "Fig2_PanelA_eccent.tiff",type = "tiff", device = dev.cur(), dpi = 600, width = 18, height = 18)
+
+
+# ## Create a SM figure having a look at other information-sharing networks
+# ## Set the layout for the figure
+# par(mfrow=c(3,3))
+# 
+# ## Run the sea turtle bycatch plot again but this time label it
+# plot3 <-  plot.igraph(am.i6,
+#                       layout=am.lay,
+#                       vertex.size=vert.sizes,
+#                       vertex.label=NA,
+#                       edge.width=edgew,
+#                       edge.color=edge.cols,
+#                       vertex.frame.color=V(am.i6)$vertex.frame.color,
+#                       vertex.color = adjustcolor(V(am.i6)$color, alpha.f = .8),
+#                       vertex.shape=V(am.i6)$shape,
+#                       vert.cols.trans=vert.cols.trans,
+#                       edge.arrow.width=1.9,
+#                       edge.arrow.size=0.25,
+#                       edge.curved=T,
+#                       main = "Sea turtle bycatch")
+# 
+# quartz.save(plot3,  file = "Sea_turtle_network.tiff",type = "tiff", device = dev.cur(), dpi = 600, width = 12, height = 12)
+# 
+# ## Pull out the fishing regulations network and convert it to an adjacency graph
+# am.u<-resp.just.infos[["nominee_fishing_regulations"]]
+# am.i<-graph.adjacency(am.u,mode=("directed"),diag=F,weighted=T) #igraph - creates a graph for plotting
+# 
+# ## To understand the network size
+# E(am.i) # network size by edges or links
+# V(am.i) # network size by vertices or nodes
+# ## Initial plot of sea turtle bycatch data
+# 
+# ## Calculate the average distance across the network
+# mean_distance(am.i, directed = T) #4.8 contacts on average across the network
+# ## Calculate the centralisation
+# centr_degree(am.i, mode = "in", normalized = T) # 5.1% centralised around one node
+# ## Calcuate the network density (of all posible ties how many ties are present)
+# edge_density(am.i, loops = F) # 0.97% of possible ties are present
+# ## Calculate the degree centrality of each node
+# degree(am.i)
+# ## Calculate the mean degree centrality
+# mean(degree(am.i)) # 3.18
+# 
+# 
+# ## Add node attributes of interest to the network
+# 
+# ## Set vertex attributes of interest from the regressions
+# am.i2 <- set_vertex_attr(am.i, "vessel", value = resp.inds.info$vessel_type)
+# am.i3 <- set_vertex_attr(am.i2, "resp", value = as.character(resp.inds.info$respondent))
+# am.i4 <- set_vertex_attr(am.i3, "TechAware", value = resp.inds.info$aware_of_technologies_being_introduced)
+# am.i5 <- set_vertex_attr(am.i4, "prodelphinus", value = resp.inds.info$prodelphinus_cooperative_member)
+# am.i6 <- set_vertex_attr(am.i5, "perception", value = resp.inds.info$perception_of_bycatch_reduction3)
+# am.i7 <- set_vertex_attr(am.i6, "GremioMember", value = resp.inds.info$No_gremio)
+# am.i8 <- set_vertex_attr(am.i7, "President", value = resp.inds.info$Gremio_president)
+# am.i9 <- set_vertex_attr(am.i8, "Age", value = resp.inds.info$skip_age)
+# 
+# 
+# vertex_attr(am.i6)
+# 
+# ## set layout of the network
+# m <- layout_nicely(am.i6)
+# 
+# ## set text size of labelled vertices/nodes
+# # V(am.i5)$label.cex = 0.4
+# 
+# ## set colour of vertex attribute according to vessel type
+# # V(am.i6)$color <- ifelse(V(am.i6)$vessel == 1, "dodgerblue", "tan4")
+# # V(am.i6)$vertex.frame.color <- ifelse(V(am.i6)$prodelphinus == 1, "darkblue", "tan4")
+# V(am.i6)$color <- ifelse(V(am.i6)$perception == 1, "#AAC2D5",
+#                          ifelse(V(am.i6)$perception == 0, "#DEF7F8",
+#                                 ifelse(V(am.i6)$perception == 3,"#DB8544","#2E609F")))
+# 
+# 
+# ## set shape of vertex attribute according to bycatch reduction cooperative members
+# V(am.i6)$shape <- ifelse(V(am.i6)$vessel == 2, "circle", "square")
+# V(am.i6)$shape
+# 
+# ## set shape of vertex attribute according to bycatch reduction cooperative members
+# V(am.i6)$vertex.frame.color <- ifelse(V(am.i6)$TechAware == 1, "#F1A384", "#005598")
+# 
+# 
+# ## red C60000
+# 
+# ## Figure 1. Panel A.
+# ## Here I am using Josh's code to set up an illustrative network to incorporate
+# ## some node attributes of interest based on the regression analysis.
+# 
+# # display.contexts<-c("Gear","Weather","Location","Activity","T. Bycatch", "Tech.", "Regs.","Finance","Capt.")
+# # short.contexts<-short.names[4:12]
+# # short.contexts.t1<-c("turtle",short.contexts[!short.contexts=="turtle"])
+# # display.contexts.t1<-c("T. Bycatch",display.contexts[!display.contexts=="T. Bycatch"])
+# 
+# colfunc<- colorRampPalette(c('grey','darkgreen'))
+# 
+# circlay<-T #whether network should be circular
+# any.lay<-T #whether all networks in loop should have the same layout
+# 
+# ##set the size of
+# dev.new(height=7.5,width=7);par(mar=c(0,0,1,0));par(mfrow=c(1,1))
+# 
+# am.u<-resp.just.infos[["nominee_fishing_regulations"]]
+# am.i<-graph.adjacency(am.u,mode=("directed"),diag=F,weighted=T) #igraph - creates a graph for plotting
+# 
+# any.am.u<-any.am[rownames(am.u),colnames(am.u)]
+# any.am.i<-graph.adjacency(any.am.u,mode=("directed"),diag=F,weighted=T) #igraph
+# 
+# 
+# if(!any.lay){
+#   am.lay<-layout.fruchterman.reingold(am.i6)}
+# 
+# if(any.lay){
+#   am.lay<-layout.fruchterman.reingold(any.am.i)}
+# 
+# if(circlay==T){ #whether to keep a circle layout
+# 
+#   ps<-nrow(am.lay)
+#   dim.tl<-ceiling(sqrt(ps))*2
+#   xpoints1<-floor(-dim.tl/2):ceiling(dim.tl/2)
+# 
+#   xpoints2<-xpoints1+0.5
+#   ypoints1<-xpoints1
+#   ypoints2<-xpoints2
+#   grid.lay1<-expand.grid(xpoints2,ypoints1)
+#   grid.lay2<-expand.grid(xpoints1,ypoints2)
+#   grid.lay3<-expand.grid(xpoints1,ypoints1)
+#   grid.lay4<-expand.grid(xpoints2,ypoints2)
+#   grid.lay<-rbind(grid.lay1,grid.lay2,grid.lay3,grid.lay4)
+#   grid.lay[,1]<-jitter(grid.lay[,1],1)
+#   grid.lay[,2]<-jitter(grid.lay[,2],1)
+#   euc.dist <- function(x1, x2) sqrt(sum((x1 - x2) ^ 2))
+#   grid.lay[,3]<-apply(grid.lay,1,function(a)euc.dist(matrix(c(mean(grid.lay[,1]),mean(grid.lay[,2])),1,2),a))
+#   max.dist<-grid.lay[,3][true.rank(grid.lay[,3])==ps]
+#   g.lay.c<-grid.lay[grid.lay[,3]<=max.dist,]
+#   g.lay.c[,1]<-scale(g.lay.c[,1])[,1]
+#   g.lay.c[,2]<-scale(g.lay.c[,2])[,1]
+#   am.lay[,1]<-scale(am.lay[,1])[,1]
+#   am.lay[,2]<-scale(am.lay[,2])[,1]
+#   distances <- rdist(am.lay[,1:2],g.lay.c[,1:2])
+#   sol <- solve_LSAP(t(distances))
+#   am.lay[as.numeric(sol),1:2]<-as.matrix(g.lay.c[,1:2])
+# 
+# }
+# 
+# ##This changes the node size according to in (or out) degree
+# strengths.out<-strength(am.i6,mode="out")
+# strengths.in<-strength(am.i6,mode="in")
+# vert.sizes<-range01(rank(strengths.in))
+# vert.sizes<-vert.sizes+0.3
+# vert.sizes<-vert.sizes*6
+# 
+# vert.cols<-rep("grey",length(vert.sizes))
+# vert.cols<-as.character(range01(strengths.in))
+# vert.cols<-colfunc(100)[range.use(rank(as.numeric(cut(as.numeric(strengths.in),breaks = 100))),1,100)]
+# 
+# ## Make blue nodes
+# vert.shapes<-"circle"
+# vert.cols.trans<-makeTrans(vert.cols)
+# edge.cols<-makeTrans("darkblue")
+# 
+# ##Can use this section of code to make grey links for any.am.i networks that can be
+# ##included underneath like in the SNA manuscript 1.
+# # edgew<-E(any.am.i)$weight
+# # if(all(edgew %in% 0:1)){
+# #   edgew<-1} else{
+# #     edgew<-range.use(edgew,0.1,0.5)}
+# # edge.cols<-"grey"
+# # plot.igraph(any.am.i,layout=am.lay,vertex.size=vert.sizes,vertex.label=NA,edge.width=edgew,edge.color=edge.cols,vertex.frame.color=vert.cols.trans,vertex.color=vert.cols.trans,edge.curved=T,add=F,edge.arrow.size=0)
+# 
+# #making grey links
+# edgew<-E(am.i6)$weight
+# if(all(edgew %in% 0:1)){
+#   edgew<-1} else{
+#     edgew<-range.use(edgew,0.1,0.5)}
+# edge.cols<-makeTrans("grey50")
+# 
+# 
+# alpha.vec <- runif(200,0,1)
+# 
+# 
+# ## Figure 1, Panel A
+# plot4 <-  plot.igraph(am.i6,
+#                       layout=am.lay,
+#                       vertex.size=vert.sizes,
+#                       vertex.label=NA,
+#                       edge.width=edgew,
+#                       edge.color=edge.cols,
+#                       vertex.frame.color=V(am.i6)$vertex.frame.color,
+#                       vertex.color = adjustcolor(V(am.i6)$color, alpha.f = .8),
+#                       vertex.shape=V(am.i6)$shape,
+#                       vert.cols.trans=vert.cols.trans,
+#                       edge.arrow.width=1.9,
+#                       edge.arrow.size=0.25,
+#                       edge.curved=T,
+#                       main = "Fishing regulations")
+# 
+# quartz.sacve(plot4,  file = "Fishing_regs_network.tiff",type = "tiff", device = dev.cur(), dpi = 600, width = 12, height = 12)
+
+# ## Pull out the weather network and convert it to an adjacency graph
+# am.u<-resp.just.infos[["nominee_weather"]]
+# am.i<-graph.adjacency(am.u,mode=("directed"),diag=F,weighted=T) #igraph - creates a graph for plotting
+# 
+# ## To understand the network size
+# E(am.i) # network size by edges or links
+# V(am.i) # network size by vertices or nodes
+# ## Initial plot of sea turtle bycatch data
+# 
+# ## Calculate the average distance across the network
+# mean_distance(am.i, directed = T) #4.8 contacts on average across the network 
+# ## Calculate the centralisation
+# centr_degree(am.i, mode = "in", normalized = T) # 5.1% centralised around one node
+# ## Calcuate the network density (of all posible ties how many ties are present)
+# edge_density(am.i, loops = F) # 0.97% of possible ties are present
+# ## Calculate the degree centrality of each node
+# degree(am.i)
+# ## Calculate the mean degree centrality
+# mean(degree(am.i)) # 3.18
+# 
+# 
+# ## Add node attributes of interest to the network
+# 
+# ## Set vertex attributes of interest from the regressions
+# am.i2 <- set_vertex_attr(am.i, "vessel", value = resp.inds.info$vessel_type)
+# am.i3 <- set_vertex_attr(am.i2, "resp", value = as.character(resp.inds.info$respondent))
+# am.i4 <- set_vertex_attr(am.i3, "TechAware", value = resp.inds.info$aware_of_technologies_being_introduced)
+# am.i5 <- set_vertex_attr(am.i4, "prodelphinus", value = resp.inds.info$prodelphinus_cooperative_member)
+# am.i6 <- set_vertex_attr(am.i5, "perception", value = resp.inds.info$perception_of_bycatch_reduction3)
+# am.i7 <- set_vertex_attr(am.i6, "GremioMember", value = resp.inds.info$No_gremio)
+# am.i8 <- set_vertex_attr(am.i7, "President", value = resp.inds.info$Gremio_president)
+# am.i9 <- set_vertex_attr(am.i8, "Age", value = resp.inds.info$skip_age)
+# 
+# 
+# vertex_attr(am.i6)
+# 
+# ## set layout of the network
+# m <- layout_nicely(am.i6) 
+# 
+# ## set text size of labelled vertices/nodes
+# # V(am.i5)$label.cex = 0.4 
+# 
+# ## set colour of vertex attribute according to vessel type
+# # V(am.i6)$color <- ifelse(V(am.i6)$vessel == 1, "dodgerblue", "tan4")
+# # V(am.i6)$vertex.frame.color <- ifelse(V(am.i6)$prodelphinus == 1, "darkblue", "tan4")
+# V(am.i6)$color <- ifelse(V(am.i6)$perception == 1, "#AAC2D5", 
+#                          ifelse(V(am.i6)$perception == 0, "#DEF7F8",
+#                                 ifelse(V(am.i6)$perception == 3,"#DB8544","#2E609F")))
+# 
+# 
+# ## set shape of vertex attribute according to bycatch reduction cooperative members 
+# V(am.i6)$shape <- ifelse(V(am.i6)$vessel == 2, "circle", "square")
+# V(am.i6)$shape
+# 
+# ## set shape of vertex attribute according to bycatch reduction cooperative members 
+# V(am.i6)$vertex.frame.color <- ifelse(V(am.i6)$TechAware == 1, "#000000", "#FF0000")
+# 
+# ## red C60000
+# 
+# ## Figure 1. Panel A. 
+# ## Here I am using Josh's code to set up an illustrative network to incorporate 
+# ## some node attributes of interest based on the regression analysis.
+# 
+# # display.contexts<-c("Gear","Weather","Location","Activity","T. Bycatch", "Tech.", "Regs.","Finance","Capt.")
+# # short.contexts<-short.names[4:12]
+# # short.contexts.t1<-c("turtle",short.contexts[!short.contexts=="turtle"])
+# # display.contexts.t1<-c("T. Bycatch",display.contexts[!display.contexts=="T. Bycatch"])
+# 
+# colfunc<- colorRampPalette(c('grey','darkgreen'))
+# 
+# circlay<-T #whether network should be circular
+# any.lay<-T #whether all networks in loop should have the same layout
+# 
+# ##set the size of 
+# dev.new(height=7.5,width=7);par(mar=c(0,0,1,0));par(mfrow=c(1,1))
+# 
+# am.u<-resp.just.infos[["nominee_weather"]]
+# am.i<-graph.adjacency(am.u,mode=("directed"),diag=F,weighted=T) #igraph - creates a graph for plotting
+# 
+# any.am.u<-any.am[rownames(am.u),colnames(am.u)]
+# any.am.i<-graph.adjacency(any.am.u,mode=("directed"),diag=F,weighted=T) #igraph
+# 
+# 
+# if(!any.lay){ 
+#   am.lay<-layout.fruchterman.reingold(am.i6)}
+# 
+# if(any.lay){
+#   am.lay<-layout.fruchterman.reingold(any.am.i)}
+# 
+# if(circlay==T){ #whether to keep a circle layout
+#   
+#   ps<-nrow(am.lay)
+#   dim.tl<-ceiling(sqrt(ps))*2 
+#   xpoints1<-floor(-dim.tl/2):ceiling(dim.tl/2)
+#   
+#   xpoints2<-xpoints1+0.5
+#   ypoints1<-xpoints1
+#   ypoints2<-xpoints2
+#   grid.lay1<-expand.grid(xpoints2,ypoints1)
+#   grid.lay2<-expand.grid(xpoints1,ypoints2)
+#   grid.lay3<-expand.grid(xpoints1,ypoints1)
+#   grid.lay4<-expand.grid(xpoints2,ypoints2)
+#   grid.lay<-rbind(grid.lay1,grid.lay2,grid.lay3,grid.lay4)
+#   grid.lay[,1]<-jitter(grid.lay[,1],1)
+#   grid.lay[,2]<-jitter(grid.lay[,2],1)
+#   euc.dist <- function(x1, x2) sqrt(sum((x1 - x2) ^ 2))
+#   grid.lay[,3]<-apply(grid.lay,1,function(a)euc.dist(matrix(c(mean(grid.lay[,1]),mean(grid.lay[,2])),1,2),a))
+#   max.dist<-grid.lay[,3][true.rank(grid.lay[,3])==ps]
+#   g.lay.c<-grid.lay[grid.lay[,3]<=max.dist,]
+#   g.lay.c[,1]<-scale(g.lay.c[,1])[,1]
+#   g.lay.c[,2]<-scale(g.lay.c[,2])[,1]
+#   am.lay[,1]<-scale(am.lay[,1])[,1]
+#   am.lay[,2]<-scale(am.lay[,2])[,1]
+#   distances <- rdist(am.lay[,1:2],g.lay.c[,1:2]) 
+#   sol <- solve_LSAP(t(distances))
+#   am.lay[as.numeric(sol),1:2]<-as.matrix(g.lay.c[,1:2])
+#   
+# }
+# 
+# ##This changes the node size according to in (or out) degree 
+# strengths.out<-strength(am.i6,mode="out")
+# strengths.in<-strength(am.i6,mode="in")
+# vert.sizes<-range01(rank(strengths.in))
+# vert.sizes<-vert.sizes+0.3
+# vert.sizes<-vert.sizes*6
+# 
+# vert.cols<-rep("grey",length(vert.sizes))
+# vert.cols<-as.character(range01(strengths.in))
+# vert.cols<-colfunc(100)[range.use(rank(as.numeric(cut(as.numeric(strengths.in),breaks = 100))),1,100)]
+# 
+# ## Make blue nodes
+# vert.shapes<-"circle"
+# vert.cols.trans<-makeTrans(vert.cols)
+# edge.cols<-makeTrans("darkblue")
+# 
+# ##Can use this section of code to make grey links for any.am.i networks that can be
+# ##included underneath like in the SNA manuscript 1. 
+# # edgew<-E(any.am.i)$weight
+# # if(all(edgew %in% 0:1)){
+# #   edgew<-1} else{
+# #     edgew<-range.use(edgew,0.1,0.5)}
+# # edge.cols<-"grey"
+# # plot.igraph(any.am.i,layout=am.lay,vertex.size=vert.sizes,vertex.label=NA,edge.width=edgew,edge.color=edge.cols,vertex.frame.color=vert.cols.trans,vertex.color=vert.cols.trans,edge.curved=T,add=F,edge.arrow.size=0)
+# 
+# #making grey links
+# edgew<-E(am.i6)$weight
+# if(all(edgew %in% 0:1)){
+#   edgew<-1} else{
+#     edgew<-range.use(edgew,0.1,0.5)}
+# edge.cols<-makeTrans("grey50")
+# 
+# 
+# alpha.vec <- runif(200,0,1)
+# 
+# 
+# ## Figure 1, Panel A
+# plot5 <-  plot.igraph(am.i6,
+#                       layout=am.lay,
+#                       vertex.size=vert.sizes,
+#                       vertex.label=NA,
+#                       edge.width=edgew,
+#                       edge.color=edge.cols,
+#                       vertex.frame.color=V(am.i6)$vertex.frame.color,
+#                       vertex.color = adjustcolor(V(am.i6)$color, alpha.f = .8), 
+#                       vertex.shape=V(am.i6)$shape,
+#                       vert.cols.trans=vert.cols.trans, 
+#                       edge.arrow.width=1.9,
+#                       edge.arrow.size=0.25,
+#                       edge.curved=T,
+#                       main = "Weather")
+# 
+# quartz.save(plot5,  file = "weather_network.tiff",type = "tiff", device = dev.cur(), dpi = 600, width = 12, height = 12)
+# 
+# ## Pull out the gear type network and convert it to an adjacency graph
+# am.u<-resp.just.infos[["nominee_gear_type"]]
+# am.i<-graph.adjacency(am.u,mode=("directed"),diag=F,weighted=T) #igraph - creates a graph for plotting
+# 
+# ## To understand the network size
+# E(am.i) # network size by edges or links
+# V(am.i) # network size by vertices or nodes
+# ## Initial plot of sea turtle bycatch data
+# 
+# ## Calculate the average distance across the network
+# mean_distance(am.i, directed = T) #4.8 contacts on average across the network 
+# ## Calculate the centralisation
+# centr_degree(am.i, mode = "in", normalized = T) # 5.1% centralised around one node
+# ## Calcuate the network density (of all posible ties how many ties are present)
+# edge_density(am.i, loops = F) # 0.97% of possible ties are present
+# ## Calculate the degree centrality of each node
+# degree(am.i)
+# ## Calculate the mean degree centrality
+# mean(degree(am.i)) # 3.18
+# 
+# 
+# ## Add node attributes of interest to the network
+# 
+# ## Set vertex attributes of interest from the regressions
+# am.i2 <- set_vertex_attr(am.i, "vessel", value = resp.inds.info$vessel_type)
+# am.i3 <- set_vertex_attr(am.i2, "resp", value = as.character(resp.inds.info$respondent))
+# am.i4 <- set_vertex_attr(am.i3, "TechAware", value = resp.inds.info$aware_of_technologies_being_introduced)
+# am.i5 <- set_vertex_attr(am.i4, "prodelphinus", value = resp.inds.info$prodelphinus_cooperative_member)
+# am.i6 <- set_vertex_attr(am.i5, "perception", value = resp.inds.info$perception_of_bycatch_reduction3)
+# am.i7 <- set_vertex_attr(am.i6, "GremioMember", value = resp.inds.info$No_gremio)
+# am.i8 <- set_vertex_attr(am.i7, "President", value = resp.inds.info$Gremio_president)
+# am.i9 <- set_vertex_attr(am.i8, "Age", value = resp.inds.info$skip_age)
+# 
+# 
+# vertex_attr(am.i6)
+# 
+# ## set layout of the network
+# m <- layout_nicely(am.i6) 
+# 
+# ## set text size of labelled vertices/nodes
+# # V(am.i5)$label.cex = 0.4 
+# 
+# ## set colour of vertex attribute according to vessel type
+# # V(am.i6)$color <- ifelse(V(am.i6)$vessel == 1, "dodgerblue", "tan4")
+# # V(am.i6)$vertex.frame.color <- ifelse(V(am.i6)$prodelphinus == 1, "darkblue", "tan4")
+# V(am.i6)$color <- ifelse(V(am.i6)$perception == 1, "#AAC2D5", 
+#                          ifelse(V(am.i6)$perception == 0, "#DEF7F8",
+#                                 ifelse(V(am.i6)$perception == 3,"#DB8544","#2E609F")))
+# 
+# 
+# ## set shape of vertex attribute according to bycatch reduction cooperative members 
+# V(am.i6)$shape <- ifelse(V(am.i6)$vessel == 2, "circle", "square")
+# V(am.i6)$shape
+# 
+# ## set shape of vertex attribute according to bycatch reduction cooperative members 
+# V(am.i6)$vertex.frame.color <- ifelse(V(am.i6)$TechAware == 1, "#000000", "#FF0000")
+# 
+# ## red C60000
+# 
+# ## Figure 1. Panel A. 
+# ## Here I am using Josh's code to set up an illustrative network to incorporate 
+# ## some node attributes of interest based on the regression analysis.
+# 
+# # display.contexts<-c("Gear","Weather","Location","Activity","T. Bycatch", "Tech.", "Regs.","Finance","Capt.")
+# # short.contexts<-short.names[4:12]
+# # short.contexts.t1<-c("turtle",short.contexts[!short.contexts=="turtle"])
+# # display.contexts.t1<-c("T. Bycatch",display.contexts[!display.contexts=="T. Bycatch"])
+# 
+# colfunc<- colorRampPalette(c('grey','darkgreen'))
+# 
+# circlay<-T #whether network should be circular
+# any.lay<-T #whether all networks in loop should have the same layout
+# 
+# ##set the size of 
+# dev.new(height=7.5,width=7);par(mar=c(0,0,1,0));par(mfrow=c(1,1))
+# 
+# am.u<-resp.just.infos[["nominee_gear_type"]]
+# am.i<-graph.adjacency(am.u,mode=("directed"),diag=F,weighted=T) #igraph - creates a graph for plotting
+# 
+# any.am.u<-any.am[rownames(am.u),colnames(am.u)]
+# any.am.i<-graph.adjacency(any.am.u,mode=("directed"),diag=F,weighted=T) #igraph
+# 
+# 
+# if(!any.lay){ 
+#   am.lay<-layout.fruchterman.reingold(am.i6)}
+# 
+# if(any.lay){
+#   am.lay<-layout.fruchterman.reingold(any.am.i)}
+# 
+# if(circlay==T){ #whether to keep a circle layout
+#   
+#   ps<-nrow(am.lay)
+#   dim.tl<-ceiling(sqrt(ps))*2 
+#   xpoints1<-floor(-dim.tl/2):ceiling(dim.tl/2)
+#   
+#   xpoints2<-xpoints1+0.5
+#   ypoints1<-xpoints1
+#   ypoints2<-xpoints2
+#   grid.lay1<-expand.grid(xpoints2,ypoints1)
+#   grid.lay2<-expand.grid(xpoints1,ypoints2)
+#   grid.lay3<-expand.grid(xpoints1,ypoints1)
+#   grid.lay4<-expand.grid(xpoints2,ypoints2)
+#   grid.lay<-rbind(grid.lay1,grid.lay2,grid.lay3,grid.lay4)
+#   grid.lay[,1]<-jitter(grid.lay[,1],1)
+#   grid.lay[,2]<-jitter(grid.lay[,2],1)
+#   euc.dist <- function(x1, x2) sqrt(sum((x1 - x2) ^ 2))
+#   grid.lay[,3]<-apply(grid.lay,1,function(a)euc.dist(matrix(c(mean(grid.lay[,1]),mean(grid.lay[,2])),1,2),a))
+#   max.dist<-grid.lay[,3][true.rank(grid.lay[,3])==ps]
+#   g.lay.c<-grid.lay[grid.lay[,3]<=max.dist,]
+#   g.lay.c[,1]<-scale(g.lay.c[,1])[,1]
+#   g.lay.c[,2]<-scale(g.lay.c[,2])[,1]
+#   am.lay[,1]<-scale(am.lay[,1])[,1]
+#   am.lay[,2]<-scale(am.lay[,2])[,1]
+#   distances <- rdist(am.lay[,1:2],g.lay.c[,1:2]) 
+#   sol <- solve_LSAP(t(distances))
+#   am.lay[as.numeric(sol),1:2]<-as.matrix(g.lay.c[,1:2])
+#   
+# }
+# 
+# ##This changes the node size according to in (or out) degree 
+# strengths.out<-strength(am.i6,mode="out")
+# strengths.in<-strength(am.i6,mode="in")
+# vert.sizes<-range01(rank(strengths.in))
+# vert.sizes<-vert.sizes+0.3
+# vert.sizes<-vert.sizes*6
+# 
+# vert.cols<-rep("grey",length(vert.sizes))
+# vert.cols<-as.character(range01(strengths.in))
+# vert.cols<-colfunc(100)[range.use(rank(as.numeric(cut(as.numeric(strengths.in),breaks = 100))),1,100)]
+# 
+# ## Make blue nodes
+# vert.shapes<-"circle"
+# vert.cols.trans<-makeTrans(vert.cols)
+# edge.cols<-makeTrans("darkblue")
+# 
+# ##Can use this section of code to make grey links for any.am.i networks that can be
+# ##included underneath like in the SNA manuscript 1. 
+# # edgew<-E(any.am.i)$weight
+# # if(all(edgew %in% 0:1)){
+# #   edgew<-1} else{
+# #     edgew<-range.use(edgew,0.1,0.5)}
+# # edge.cols<-"grey"
+# # plot.igraph(any.am.i,layout=am.lay,vertex.size=vert.sizes,vertex.label=NA,edge.width=edgew,edge.color=edge.cols,vertex.frame.color=vert.cols.trans,vertex.color=vert.cols.trans,edge.curved=T,add=F,edge.arrow.size=0)
+# 
+# #making grey links
+# edgew<-E(am.i6)$weight
+# if(all(edgew %in% 0:1)){
+#   edgew<-1} else{
+#     edgew<-range.use(edgew,0.1,0.5)}
+# edge.cols<-makeTrans("grey50")
+# 
+# 
+# alpha.vec <- runif(200,0,1)
+# 
+# 
+# ## Figure 1, Panel A
+# plot6 <-  plot.igraph(am.i6,
+#                       layout=am.lay,
+#                       vertex.size=vert.sizes,
+#                       vertex.label=NA,
+#                       edge.width=edgew,
+#                       edge.color=edge.cols,
+#                       vertex.frame.color=V(am.i6)$vertex.frame.color,
+#                       vertex.color = adjustcolor(V(am.i6)$color, alpha.f = .8), 
+#                       vertex.shape=V(am.i6)$shape,
+#                       vert.cols.trans=vert.cols.trans, 
+#                       edge.arrow.width=1.9,
+#                       edge.arrow.size=0.25,
+#                       edge.curved=T,
+#                       main = "Gear type")
+# 
+# quartz.save(plot6,  file = "Gear_type_network.tiff",type = "tiff", device = dev.cur(), dpi = 600, width = 12, height = 12)
+# 
+# 
+# ## Pull out the fishing location network and convert it to an adjacency graph
+# am.u<-resp.just.infos[["nominee_fish_location"]]
+# am.i<-graph.adjacency(am.u,mode=("directed"),diag=F,weighted=T) #igraph - creates a graph for plotting
+# 
+# ## To understand the network size
+# E(am.i) # network size by edges or links
+# V(am.i) # network size by vertices or nodes
+# ## Initial plot of sea turtle bycatch data
+# 
+# ## Calculate the average distance across the network
+# mean_distance(am.i, directed = T) #4.8 contacts on average across the network 
+# ## Calculate the centralisation
+# centr_degree(am.i, mode = "in", normalized = T) # 5.1% centralised around one node
+# ## Calcuate the network density (of all posible ties how many ties are present)
+# edge_density(am.i, loops = F) # 0.97% of possible ties are present
+# ## Calculate the degree centrality of each node
+# degree(am.i)
+# ## Calculate the mean degree centrality
+# mean(degree(am.i)) # 3.18
+# 
+# 
+# ## Add node attributes of interest to the network
+# 
+# ## Set vertex attributes of interest from the regressions
+# am.i2 <- set_vertex_attr(am.i, "vessel", value = resp.inds.info$vessel_type)
+# am.i3 <- set_vertex_attr(am.i2, "resp", value = as.character(resp.inds.info$respondent))
+# am.i4 <- set_vertex_attr(am.i3, "TechAware", value = resp.inds.info$aware_of_technologies_being_introduced)
+# am.i5 <- set_vertex_attr(am.i4, "prodelphinus", value = resp.inds.info$prodelphinus_cooperative_member)
+# am.i6 <- set_vertex_attr(am.i5, "perception", value = resp.inds.info$perception_of_bycatch_reduction3)
+# am.i7 <- set_vertex_attr(am.i6, "GremioMember", value = resp.inds.info$No_gremio)
+# am.i8 <- set_vertex_attr(am.i7, "President", value = resp.inds.info$Gremio_president)
+# am.i9 <- set_vertex_attr(am.i8, "Age", value = resp.inds.info$skip_age)
+# 
+# 
+# vertex_attr(am.i6)
+# 
+# ## set layout of the network
+# m <- layout_nicely(am.i6) 
+# 
+# ## set text size of labelled vertices/nodes
+# # V(am.i5)$label.cex = 0.4 
+# 
+# ## set colour of vertex attribute according to vessel type
+# # V(am.i6)$color <- ifelse(V(am.i6)$vessel == 1, "dodgerblue", "tan4")
+# # V(am.i6)$vertex.frame.color <- ifelse(V(am.i6)$prodelphinus == 1, "darkblue", "tan4")
+# V(am.i6)$color <- ifelse(V(am.i6)$perception == 1, "#AAC2D5", 
+#                          ifelse(V(am.i6)$perception == 0, "#DEF7F8",
+#                                 ifelse(V(am.i6)$perception == 3,"#DB8544","#2E609F")))
+# 
+# 
+# ## set shape of vertex attribute according to bycatch reduction cooperative members 
+# V(am.i6)$shape <- ifelse(V(am.i6)$vessel == 2, "circle", "square")
+# V(am.i6)$shape
+# 
+# ## set shape of vertex attribute according to bycatch reduction cooperative members 
+# V(am.i6)$vertex.frame.color <- ifelse(V(am.i6)$TechAware == 1, "#000000", "#FF0000")
+# 
+# ## red C60000
+# 
+# ## Figure 1. Panel A. 
+# ## Here I am using Josh's code to set up an illustrative network to incorporate 
+# ## some node attributes of interest based on the regression analysis.
+# 
+# # display.contexts<-c("Gear","Weather","Location","Activity","T. Bycatch", "Tech.", "Regs.","Finance","Capt.")
+# # short.contexts<-short.names[4:12]
+# # short.contexts.t1<-c("turtle",short.contexts[!short.contexts=="turtle"])
+# # display.contexts.t1<-c("T. Bycatch",display.contexts[!display.contexts=="T. Bycatch"])
+# 
+# colfunc<- colorRampPalette(c('grey','darkgreen'))
+# 
+# circlay<-T #whether network should be circular
+# any.lay<-T #whether all networks in loop should have the same layout
+# 
+# ##set the size of 
+# dev.new(height=7.5,width=7);par(mar=c(0,0,1,0));par(mfrow=c(1,1))
+# 
+# am.u<-resp.just.infos[["nominee_fish_location"]]
+# am.i<-graph.adjacency(am.u,mode=("directed"),diag=F,weighted=T) #igraph - creates a graph for plotting
+# 
+# any.am.u<-any.am[rownames(am.u),colnames(am.u)]
+# any.am.i<-graph.adjacency(any.am.u,mode=("directed"),diag=F,weighted=T) #igraph
+# 
+# 
+# if(!any.lay){ 
+#   am.lay<-layout.fruchterman.reingold(am.i6)}
+# 
+# if(any.lay){
+#   am.lay<-layout.fruchterman.reingold(any.am.i)}
+# 
+# if(circlay==T){ #whether to keep a circle layout
+#   
+#   ps<-nrow(am.lay)
+#   dim.tl<-ceiling(sqrt(ps))*2 
+#   xpoints1<-floor(-dim.tl/2):ceiling(dim.tl/2)
+#   
+#   xpoints2<-xpoints1+0.5
+#   ypoints1<-xpoints1
+#   ypoints2<-xpoints2
+#   grid.lay1<-expand.grid(xpoints2,ypoints1)
+#   grid.lay2<-expand.grid(xpoints1,ypoints2)
+#   grid.lay3<-expand.grid(xpoints1,ypoints1)
+#   grid.lay4<-expand.grid(xpoints2,ypoints2)
+#   grid.lay<-rbind(grid.lay1,grid.lay2,grid.lay3,grid.lay4)
+#   grid.lay[,1]<-jitter(grid.lay[,1],1)
+#   grid.lay[,2]<-jitter(grid.lay[,2],1)
+#   euc.dist <- function(x1, x2) sqrt(sum((x1 - x2) ^ 2))
+#   grid.lay[,3]<-apply(grid.lay,1,function(a)euc.dist(matrix(c(mean(grid.lay[,1]),mean(grid.lay[,2])),1,2),a))
+#   max.dist<-grid.lay[,3][true.rank(grid.lay[,3])==ps]
+#   g.lay.c<-grid.lay[grid.lay[,3]<=max.dist,]
+#   g.lay.c[,1]<-scale(g.lay.c[,1])[,1]
+#   g.lay.c[,2]<-scale(g.lay.c[,2])[,1]
+#   am.lay[,1]<-scale(am.lay[,1])[,1]
+#   am.lay[,2]<-scale(am.lay[,2])[,1]
+#   distances <- rdist(am.lay[,1:2],g.lay.c[,1:2]) 
+#   sol <- solve_LSAP(t(distances))
+#   am.lay[as.numeric(sol),1:2]<-as.matrix(g.lay.c[,1:2])
+#   
+# }
+# 
+# ##This changes the node size according to in (or out) degree 
+# strengths.out<-strength(am.i6,mode="out")
+# strengths.in<-strength(am.i6,mode="in")
+# vert.sizes<-range01(rank(strengths.in))
+# vert.sizes<-vert.sizes+0.3
+# vert.sizes<-vert.sizes*6
+# 
+# vert.cols<-rep("grey",length(vert.sizes))
+# vert.cols<-as.character(range01(strengths.in))
+# vert.cols<-colfunc(100)[range.use(rank(as.numeric(cut(as.numeric(strengths.in),breaks = 100))),1,100)]
+# 
+# ## Make blue nodes
+# vert.shapes<-"circle"
+# vert.cols.trans<-makeTrans(vert.cols)
+# edge.cols<-makeTrans("darkblue")
+# 
+# ##Can use this section of code to make grey links for any.am.i networks that can be
+# ##included underneath like in the SNA manuscript 1. 
+# # edgew<-E(any.am.i)$weight
+# # if(all(edgew %in% 0:1)){
+# #   edgew<-1} else{
+# #     edgew<-range.use(edgew,0.1,0.5)}
+# # edge.cols<-"grey"
+# # plot.igraph(any.am.i,layout=am.lay,vertex.size=vert.sizes,vertex.label=NA,edge.width=edgew,edge.color=edge.cols,vertex.frame.color=vert.cols.trans,vertex.color=vert.cols.trans,edge.curved=T,add=F,edge.arrow.size=0)
+# 
+# #making grey links
+# edgew<-E(am.i6)$weight
+# if(all(edgew %in% 0:1)){
+#   edgew<-1} else{
+#     edgew<-range.use(edgew,0.1,0.5)}
+# edge.cols<-makeTrans("grey50")
+# 
+# 
+# alpha.vec <- runif(200,0,1)
+# 
+# 
+# ## Figure 1, Panel A
+# plot7 <-  plot.igraph(am.i6,
+#                       layout=am.lay,
+#                       vertex.size=vert.sizes,
+#                       vertex.label=NA,
+#                       edge.width=edgew,
+#                       edge.color=edge.cols,
+#                       vertex.frame.color=V(am.i6)$vertex.frame.color,
+#                       vertex.color = adjustcolor(V(am.i6)$color, alpha.f = .8), 
+#                       vertex.shape=V(am.i6)$shape,
+#                       vert.cols.trans=vert.cols.trans, 
+#                       edge.arrow.width=1.9,
+#                       edge.arrow.size=0.25,
+#                       edge.curved=T,
+#                       main = "Fishing location")
+# 
+# quartz.save(plot7,  file = "Fishing_location.tiff",type = "tiff", device = dev.cur(), dpi = 600, width = 12, height = 12)
+# 
+# 
+# ## Pull out the fishing activity network and convert it to an adjacency graph
+# am.u<-resp.just.infos[["nominee_fishing_activity"]]
+# am.i<-graph.adjacency(am.u,mode=("directed"),diag=F,weighted=T) #igraph - creates a graph for plotting
+# 
+# ## To understand the network size
+# E(am.i) # network size by edges or links
+# V(am.i) # network size by vertices or nodes
+# ## Initial plot of sea turtle bycatch data
+# 
+# ## Calculate the average distance across the network
+# mean_distance(am.i, directed = T) #4.8 contacts on average across the network 
+# ## Calculate the centralisation
+# centr_degree(am.i, mode = "in", normalized = T) # 5.1% centralised around one node
+# ## Calcuate the network density (of all posible ties how many ties are present)
+# edge_density(am.i, loops = F) # 0.97% of possible ties are present
+# ## Calculate the degree centrality of each node
+# degree(am.i)
+# ## Calculate the mean degree centrality
+# mean(degree(am.i)) # 3.18
+# 
+# 
+# ## Add node attributes of interest to the network
+# 
+# ## Set vertex attributes of interest from the regressions
+# am.i2 <- set_vertex_attr(am.i, "vessel", value = resp.inds.info$vessel_type)
+# am.i3 <- set_vertex_attr(am.i2, "resp", value = as.character(resp.inds.info$respondent))
+# am.i4 <- set_vertex_attr(am.i3, "TechAware", value = resp.inds.info$aware_of_technologies_being_introduced)
+# am.i5 <- set_vertex_attr(am.i4, "prodelphinus", value = resp.inds.info$prodelphinus_cooperative_member)
+# am.i6 <- set_vertex_attr(am.i5, "perception", value = resp.inds.info$perception_of_bycatch_reduction3)
+# am.i7 <- set_vertex_attr(am.i6, "GremioMember", value = resp.inds.info$No_gremio)
+# am.i8 <- set_vertex_attr(am.i7, "President", value = resp.inds.info$Gremio_president)
+# am.i9 <- set_vertex_attr(am.i8, "Age", value = resp.inds.info$skip_age)
+# 
+# 
+# vertex_attr(am.i6)
+# 
+# ## set layout of the network
+# m <- layout_nicely(am.i6) 
+# 
+# ## set text size of labelled vertices/nodes
+# # V(am.i5)$label.cex = 0.4 
+# 
+# ## set colour of vertex attribute according to vessel type
+# # V(am.i6)$color <- ifelse(V(am.i6)$vessel == 1, "dodgerblue", "tan4")
+# # V(am.i6)$vertex.frame.color <- ifelse(V(am.i6)$prodelphinus == 1, "darkblue", "tan4")
+# V(am.i6)$color <- ifelse(V(am.i6)$perception == 1, "#AAC2D5", 
+#                          ifelse(V(am.i6)$perception == 0, "#DEF7F8",
+#                                 ifelse(V(am.i6)$perception == 3,"#DB8544","#2E609F")))
+# 
+# 
+# ## set shape of vertex attribute according to bycatch reduction cooperative members 
+# V(am.i6)$shape <- ifelse(V(am.i6)$vessel == 2, "circle", "square")
+# V(am.i6)$shape
+# 
+# ## set shape of vertex attribute according to bycatch reduction cooperative members 
+# V(am.i6)$vertex.frame.color <- ifelse(V(am.i6)$TechAware == 1, "#000000", "#FF0000")
+# 
+# ## red C60000
+# 
+# ## Figure 1. Panel A. 
+# ## Here I am using Josh's code to set up an illustrative network to incorporate 
+# ## some node attributes of interest based on the regression analysis.
+# 
+# # display.contexts<-c("Gear","Weather","Location","Activity","T. Bycatch", "Tech.", "Regs.","Finance","Capt.")
+# # short.contexts<-short.names[4:12]
+# # short.contexts.t1<-c("turtle",short.contexts[!short.contexts=="turtle"])
+# # display.contexts.t1<-c("T. Bycatch",display.contexts[!display.contexts=="T. Bycatch"])
+# 
+# colfunc<- colorRampPalette(c('grey','darkgreen'))
+# 
+# circlay<-T #whether network should be circular
+# any.lay<-T #whether all networks in loop should have the same layout
+# 
+# ##set the size of 
+# dev.new(height=7.5,width=7);par(mar=c(0,0,1,0));par(mfrow=c(1,1))
+# 
+# am.u<-resp.just.infos[["nominee_fishing_activity"]]
+# am.i<-graph.adjacency(am.u,mode=("directed"),diag=F,weighted=T) #igraph - creates a graph for plotting
+# 
+# any.am.u<-any.am[rownames(am.u),colnames(am.u)]
+# any.am.i<-graph.adjacency(any.am.u,mode=("directed"),diag=F,weighted=T) #igraph
+# 
+# 
+# if(!any.lay){ 
+#   am.lay<-layout.fruchterman.reingold(am.i6)}
+# 
+# if(any.lay){
+#   am.lay<-layout.fruchterman.reingold(any.am.i)}
+# 
+# if(circlay==T){ #whether to keep a circle layout
+#   
+#   ps<-nrow(am.lay)
+#   dim.tl<-ceiling(sqrt(ps))*2 
+#   xpoints1<-floor(-dim.tl/2):ceiling(dim.tl/2)
+#   
+#   xpoints2<-xpoints1+0.5
+#   ypoints1<-xpoints1
+#   ypoints2<-xpoints2
+#   grid.lay1<-expand.grid(xpoints2,ypoints1)
+#   grid.lay2<-expand.grid(xpoints1,ypoints2)
+#   grid.lay3<-expand.grid(xpoints1,ypoints1)
+#   grid.lay4<-expand.grid(xpoints2,ypoints2)
+#   grid.lay<-rbind(grid.lay1,grid.lay2,grid.lay3,grid.lay4)
+#   grid.lay[,1]<-jitter(grid.lay[,1],1)
+#   grid.lay[,2]<-jitter(grid.lay[,2],1)
+#   euc.dist <- function(x1, x2) sqrt(sum((x1 - x2) ^ 2))
+#   grid.lay[,3]<-apply(grid.lay,1,function(a)euc.dist(matrix(c(mean(grid.lay[,1]),mean(grid.lay[,2])),1,2),a))
+#   max.dist<-grid.lay[,3][true.rank(grid.lay[,3])==ps]
+#   g.lay.c<-grid.lay[grid.lay[,3]<=max.dist,]
+#   g.lay.c[,1]<-scale(g.lay.c[,1])[,1]
+#   g.lay.c[,2]<-scale(g.lay.c[,2])[,1]
+#   am.lay[,1]<-scale(am.lay[,1])[,1]
+#   am.lay[,2]<-scale(am.lay[,2])[,1]
+#   distances <- rdist(am.lay[,1:2],g.lay.c[,1:2]) 
+#   sol <- solve_LSAP(t(distances))
+#   am.lay[as.numeric(sol),1:2]<-as.matrix(g.lay.c[,1:2])
+#   
+# }
+# 
+# ##This changes the node size according to in (or out) degree 
+# strengths.out<-strength(am.i6,mode="out")
+# strengths.in<-strength(am.i6,mode="in")
+# vert.sizes<-range01(rank(strengths.in))
+# vert.sizes<-vert.sizes+0.3
+# vert.sizes<-vert.sizes*6
+# 
+# vert.cols<-rep("grey",length(vert.sizes))
+# vert.cols<-as.character(range01(strengths.in))
+# vert.cols<-colfunc(100)[range.use(rank(as.numeric(cut(as.numeric(strengths.in),breaks = 100))),1,100)]
+# 
+# ## Make blue nodes
+# vert.shapes<-"circle"
+# vert.cols.trans<-makeTrans(vert.cols)
+# edge.cols<-makeTrans("darkblue")
+# 
+# ##Can use this section of code to make grey links for any.am.i networks that can be
+# ##included underneath like in the SNA manuscript 1. 
+# # edgew<-E(any.am.i)$weight
+# # if(all(edgew %in% 0:1)){
+# #   edgew<-1} else{
+# #     edgew<-range.use(edgew,0.1,0.5)}
+# # edge.cols<-"grey"
+# # plot.igraph(any.am.i,layout=am.lay,vertex.size=vert.sizes,vertex.label=NA,edge.width=edgew,edge.color=edge.cols,vertex.frame.color=vert.cols.trans,vertex.color=vert.cols.trans,edge.curved=T,add=F,edge.arrow.size=0)
+# 
+# #making grey links
+# edgew<-E(am.i6)$weight
+# if(all(edgew %in% 0:1)){
+#   edgew<-1} else{
+#     edgew<-range.use(edgew,0.1,0.5)}
+# edge.cols<-makeTrans("grey50")
+# 
+# 
+# alpha.vec <- runif(200,0,1)
+# 
+# 
+# ## Figure 1, Panel A
+# plot8 <-  plot.igraph(am.i6,
+#                       layout=am.lay,
+#                       vertex.size=vert.sizes,
+#                       vertex.label=NA,
+#                       edge.width=edgew,
+#                       edge.color=edge.cols,
+#                       vertex.frame.color=V(am.i6)$vertex.frame.color,
+#                       vertex.color = adjustcolor(V(am.i6)$color, alpha.f = .8), 
+#                       vertex.shape=V(am.i6)$shape,
+#                       vert.cols.trans=vert.cols.trans, 
+#                       edge.arrow.width=1.9,
+#                       edge.arrow.size=0.25,
+#                       edge.curved=T,
+#                       main = "Fishing activity")
+# 
+# quartz.save(plot8,  file = "Fishing_activity.tiff",type = "tiff", device = dev.cur(), dpi = 600, width = 12, height = 12)
+# 
+# 
+# ## Pull out the technology maintenance network and convert it to an adjacency graph
+# am.u<-resp.just.infos[["nominee_technology_maintenance"]]
+# am.i<-graph.adjacency(am.u,mode=("directed"),diag=F,weighted=T) #igraph - creates a graph for plotting
+# 
+# ## To understand the network size
+# E(am.i) # network size by edges or links
+# V(am.i) # network size by vertices or nodes
+# ## Initial plot of sea turtle bycatch data
+# 
+# ## Calculate the average distance across the network
+# mean_distance(am.i, directed = T) #4.8 contacts on average across the network 
+# ## Calculate the centralisation
+# centr_degree(am.i, mode = "in", normalized = T) # 5.1% centralised around one node
+# ## Calcuate the network density (of all posible ties how many ties are present)
+# edge_density(am.i, loops = F) # 0.97% of possible ties are present
+# ## Calculate the degree centrality of each node
+# degree(am.i)
+# ## Calculate the mean degree centrality
+# mean(degree(am.i)) # 3.18
+# 
+# 
+# ## Add node attributes of interest to the network
+# 
+# ## Set vertex attributes of interest from the regressions
+# am.i2 <- set_vertex_attr(am.i, "vessel", value = resp.inds.info$vessel_type)
+# am.i3 <- set_vertex_attr(am.i2, "resp", value = as.character(resp.inds.info$respondent))
+# am.i4 <- set_vertex_attr(am.i3, "TechAware", value = resp.inds.info$aware_of_technologies_being_introduced)
+# am.i5 <- set_vertex_attr(am.i4, "prodelphinus", value = resp.inds.info$prodelphinus_cooperative_member)
+# am.i6 <- set_vertex_attr(am.i5, "perception", value = resp.inds.info$perception_of_bycatch_reduction3)
+# am.i7 <- set_vertex_attr(am.i6, "GremioMember", value = resp.inds.info$No_gremio)
+# am.i8 <- set_vertex_attr(am.i7, "President", value = resp.inds.info$Gremio_president)
+# am.i9 <- set_vertex_attr(am.i8, "Age", value = resp.inds.info$skip_age)
+# 
+# 
+# vertex_attr(am.i6)
+# 
+# ## set layout of the network
+# m <- layout_nicely(am.i6) 
+# 
+# ## set text size of labelled vertices/nodes
+# # V(am.i5)$label.cex = 0.4 
+# 
+# ## set colour of vertex attribute according to vessel type
+# # V(am.i6)$color <- ifelse(V(am.i6)$vessel == 1, "dodgerblue", "tan4")
+# # V(am.i6)$vertex.frame.color <- ifelse(V(am.i6)$prodelphinus == 1, "darkblue", "tan4")
+# V(am.i6)$color <- ifelse(V(am.i6)$perception == 1, "#AAC2D5", 
+#                          ifelse(V(am.i6)$perception == 0, "#DEF7F8",
+#                                 ifelse(V(am.i6)$perception == 3,"#DB8544","#2E609F")))
+# 
+# 
+# ## set shape of vertex attribute according to bycatch reduction cooperative members 
+# V(am.i6)$shape <- ifelse(V(am.i6)$vessel == 2, "circle", "square")
+# V(am.i6)$shape
+# 
+# ## set shape of vertex attribute according to bycatch reduction cooperative members 
+# V(am.i6)$vertex.frame.color <- ifelse(V(am.i6)$TechAware == 1, "#000000", "#FF0000")
+# 
+# ## red C60000
+# 
+# ## Figure 1. Panel A. 
+# ## Here I am using Josh's code to set up an illustrative network to incorporate 
+# ## some node attributes of interest based on the regression analysis.
+# 
+# # display.contexts<-c("Gear","Weather","Location","Activity","T. Bycatch", "Tech.", "Regs.","Finance","Capt.")
+# # short.contexts<-short.names[4:12]
+# # short.contexts.t1<-c("turtle",short.contexts[!short.contexts=="turtle"])
+# # display.contexts.t1<-c("T. Bycatch",display.contexts[!display.contexts=="T. Bycatch"])
+# 
+# colfunc<- colorRampPalette(c('grey','darkgreen'))
+# 
+# circlay<-T #whether network should be circular
+# any.lay<-T #whether all networks in loop should have the same layout
+# 
+# ##set the size of 
+# dev.new(height=7.5,width=7);par(mar=c(0,0,1,0));par(mfrow=c(1,1))
+# 
+# am.u<-resp.just.infos[["nominee_technology_maintenance"]]
+# am.i<-graph.adjacency(am.u,mode=("directed"),diag=F,weighted=T) #igraph - creates a graph for plotting
+# 
+# any.am.u<-any.am[rownames(am.u),colnames(am.u)]
+# any.am.i<-graph.adjacency(any.am.u,mode=("directed"),diag=F,weighted=T) #igraph
+# 
+# 
+# if(!any.lay){ 
+#   am.lay<-layout.fruchterman.reingold(am.i6)}
+# 
+# if(any.lay){
+#   am.lay<-layout.fruchterman.reingold(any.am.i)}
+# 
+# if(circlay==T){ #whether to keep a circle layout
+#   
+#   ps<-nrow(am.lay)
+#   dim.tl<-ceiling(sqrt(ps))*2 
+#   xpoints1<-floor(-dim.tl/2):ceiling(dim.tl/2)
+#   
+#   xpoints2<-xpoints1+0.5
+#   ypoints1<-xpoints1
+#   ypoints2<-xpoints2
+#   grid.lay1<-expand.grid(xpoints2,ypoints1)
+#   grid.lay2<-expand.grid(xpoints1,ypoints2)
+#   grid.lay3<-expand.grid(xpoints1,ypoints1)
+#   grid.lay4<-expand.grid(xpoints2,ypoints2)
+#   grid.lay<-rbind(grid.lay1,grid.lay2,grid.lay3,grid.lay4)
+#   grid.lay[,1]<-jitter(grid.lay[,1],1)
+#   grid.lay[,2]<-jitter(grid.lay[,2],1)
+#   euc.dist <- function(x1, x2) sqrt(sum((x1 - x2) ^ 2))
+#   grid.lay[,3]<-apply(grid.lay,1,function(a)euc.dist(matrix(c(mean(grid.lay[,1]),mean(grid.lay[,2])),1,2),a))
+#   max.dist<-grid.lay[,3][true.rank(grid.lay[,3])==ps]
+#   g.lay.c<-grid.lay[grid.lay[,3]<=max.dist,]
+#   g.lay.c[,1]<-scale(g.lay.c[,1])[,1]
+#   g.lay.c[,2]<-scale(g.lay.c[,2])[,1]
+#   am.lay[,1]<-scale(am.lay[,1])[,1]
+#   am.lay[,2]<-scale(am.lay[,2])[,1]
+#   distances <- rdist(am.lay[,1:2],g.lay.c[,1:2]) 
+#   sol <- solve_LSAP(t(distances))
+#   am.lay[as.numeric(sol),1:2]<-as.matrix(g.lay.c[,1:2])
+#   
+# }
+# 
+# ##This changes the node size according to in (or out) degree 
+# strengths.out<-strength(am.i6,mode="out")
+# strengths.in<-strength(am.i6,mode="in")
+# vert.sizes<-range01(rank(strengths.in))
+# vert.sizes<-vert.sizes+0.3
+# vert.sizes<-vert.sizes*6
+# 
+# vert.cols<-rep("grey",length(vert.sizes))
+# vert.cols<-as.character(range01(strengths.in))
+# vert.cols<-colfunc(100)[range.use(rank(as.numeric(cut(as.numeric(strengths.in),breaks = 100))),1,100)]
+# 
+# ## Make blue nodes
+# vert.shapes<-"circle"
+# vert.cols.trans<-makeTrans(vert.cols)
+# edge.cols<-makeTrans("darkblue")
+# 
+# ##Can use this section of code to make grey links for any.am.i networks that can be
+# ##included underneath like in the SNA manuscript 1. 
+# # edgew<-E(any.am.i)$weight
+# # if(all(edgew %in% 0:1)){
+# #   edgew<-1} else{
+# #     edgew<-range.use(edgew,0.1,0.5)}
+# # edge.cols<-"grey"
+# # plot.igraph(any.am.i,layout=am.lay,vertex.size=vert.sizes,vertex.label=NA,edge.width=edgew,edge.color=edge.cols,vertex.frame.color=vert.cols.trans,vertex.color=vert.cols.trans,edge.curved=T,add=F,edge.arrow.size=0)
+# 
+# #making grey links
+# edgew<-E(am.i6)$weight
+# if(all(edgew %in% 0:1)){
+#   edgew<-1} else{
+#     edgew<-range.use(edgew,0.1,0.5)}
+# edge.cols<-makeTrans("grey50")
+# 
+# 
+# alpha.vec <- runif(200,0,1)
+# 
+# 
+# ## Figure 1, Panel A
+# plot9 <-  plot.igraph(am.i6,
+#                       layout=am.lay,
+#                       vertex.size=vert.sizes,
+#                       vertex.label=NA,
+#                       edge.width=edgew,
+#                       edge.color=edge.cols,
+#                       vertex.frame.color=V(am.i6)$vertex.frame.color,
+#                       vertex.color = adjustcolor(V(am.i6)$color, alpha.f = .8), 
+#                       vertex.shape=V(am.i6)$shape,
+#                       vert.cols.trans=vert.cols.trans, 
+#                       edge.arrow.width=1.9,
+#                       edge.arrow.size=0.25,
+#                       edge.curved=T,
+#                       main = "Technology and maintenance")
+# 
+# quartz.save(plot9,  file = "Technology_maintenance.tiff",type = "tiff", device = dev.cur(), dpi = 600, width = 12, height = 12)
+# 
+# ## Pull out the fishing finances network and convert it to an adjacency graph
+# am.u<-resp.just.infos[["nominee_fishing_finances"]]
+# am.i<-graph.adjacency(am.u,mode=("directed"),diag=F,weighted=T) #igraph - creates a graph for plotting
+# 
+# ## To understand the network size
+# E(am.i) # network size by edges or links
+# V(am.i) # network size by vertices or nodes
+# ## Initial plot of sea turtle bycatch data
+# 
+# ## Calculate the average distance across the network
+# mean_distance(am.i, directed = T) #4.8 contacts on average across the network 
+# ## Calculate the centralisation
+# centr_degree(am.i, mode = "in", normalized = T) # 5.1% centralised around one node
+# ## Calcuate the network density (of all posible ties how many ties are present)
+# edge_density(am.i, loops = F) # 0.97% of possible ties are present
+# ## Calculate the degree centrality of each node
+# degree(am.i)
+# ## Calculate the mean degree centrality
+# mean(degree(am.i)) # 3.18
+# 
+# 
+# ## Add node attributes of interest to the network
+# 
+# ## Set vertex attributes of interest from the regressions
+# am.i2 <- set_vertex_attr(am.i, "vessel", value = resp.inds.info$vessel_type)
+# am.i3 <- set_vertex_attr(am.i2, "resp", value = as.character(resp.inds.info$respondent))
+# am.i4 <- set_vertex_attr(am.i3, "TechAware", value = resp.inds.info$aware_of_technologies_being_introduced)
+# am.i5 <- set_vertex_attr(am.i4, "prodelphinus", value = resp.inds.info$prodelphinus_cooperative_member)
+# am.i6 <- set_vertex_attr(am.i5, "perception", value = resp.inds.info$perception_of_bycatch_reduction3)
+# am.i7 <- set_vertex_attr(am.i6, "GremioMember", value = resp.inds.info$No_gremio)
+# am.i8 <- set_vertex_attr(am.i7, "President", value = resp.inds.info$Gremio_president)
+# am.i9 <- set_vertex_attr(am.i8, "Age", value = resp.inds.info$skip_age)
+# 
+# 
+# vertex_attr(am.i6)
+# 
+# ## set layout of the network
+# m <- layout_nicely(am.i6) 
+# 
+# ## set text size of labelled vertices/nodes
+# # V(am.i5)$label.cex = 0.4 
+# 
+# ## set colour of vertex attribute according to vessel type
+# # V(am.i6)$color <- ifelse(V(am.i6)$vessel == 1, "dodgerblue", "tan4")
+# # V(am.i6)$vertex.frame.color <- ifelse(V(am.i6)$prodelphinus == 1, "darkblue", "tan4")
+# V(am.i6)$color <- ifelse(V(am.i6)$perception == 1, "#AAC2D5", 
+#                          ifelse(V(am.i6)$perception == 0, "#DEF7F8",
+#                                 ifelse(V(am.i6)$perception == 3,"#DB8544","#2E609F")))
+# 
+# 
+# ## set shape of vertex attribute according to bycatch reduction cooperative members 
+# V(am.i6)$shape <- ifelse(V(am.i6)$vessel == 2, "circle", "square")
+# V(am.i6)$shape
+# 
+# ## set shape of vertex attribute according to bycatch reduction cooperative members 
+# V(am.i6)$vertex.frame.color <- ifelse(V(am.i6)$TechAware == 1, "#000000", "#FF0000")
+# 
+# ## red C60000
+# 
+# ## Figure 1. Panel A. 
+# ## Here I am using Josh's code to set up an illustrative network to incorporate 
+# ## some node attributes of interest based on the regression analysis.
+# 
+# # display.contexts<-c("Gear","Weather","Location","Activity","T. Bycatch", "Tech.", "Regs.","Finance","Capt.")
+# # short.contexts<-short.names[4:12]
+# # short.contexts.t1<-c("turtle",short.contexts[!short.contexts=="turtle"])
+# # display.contexts.t1<-c("T. Bycatch",display.contexts[!display.contexts=="T. Bycatch"])
+# 
+# colfunc<- colorRampPalette(c('grey','darkgreen'))
+# 
+# circlay<-T #whether network should be circular
+# any.lay<-T #whether all networks in loop should have the same layout
+# 
+# ##set the size of 
+# dev.new(height=7.5,width=7);par(mar=c(0,0,1,0));par(mfrow=c(1,1))
+# 
+# am.u<-resp.just.infos[["nominee_fishing_finances"]]
+# am.i<-graph.adjacency(am.u,mode=("directed"),diag=F,weighted=T) #igraph - creates a graph for plotting
+# 
+# any.am.u<-any.am[rownames(am.u),colnames(am.u)]
+# any.am.i<-graph.adjacency(any.am.u,mode=("directed"),diag=F,weighted=T) #igraph
+# 
+# 
+# if(!any.lay){ 
+#   am.lay<-layout.fruchterman.reingold(am.i6)}
+# 
+# if(any.lay){
+#   am.lay<-layout.fruchterman.reingold(any.am.i)}
+# 
+# if(circlay==T){ #whether to keep a circle layout
+#   
+#   ps<-nrow(am.lay)
+#   dim.tl<-ceiling(sqrt(ps))*2 
+#   xpoints1<-floor(-dim.tl/2):ceiling(dim.tl/2)
+#   
+#   xpoints2<-xpoints1+0.5
+#   ypoints1<-xpoints1
+#   ypoints2<-xpoints2
+#   grid.lay1<-expand.grid(xpoints2,ypoints1)
+#   grid.lay2<-expand.grid(xpoints1,ypoints2)
+#   grid.lay3<-expand.grid(xpoints1,ypoints1)
+#   grid.lay4<-expand.grid(xpoints2,ypoints2)
+#   grid.lay<-rbind(grid.lay1,grid.lay2,grid.lay3,grid.lay4)
+#   grid.lay[,1]<-jitter(grid.lay[,1],1)
+#   grid.lay[,2]<-jitter(grid.lay[,2],1)
+#   euc.dist <- function(x1, x2) sqrt(sum((x1 - x2) ^ 2))
+#   grid.lay[,3]<-apply(grid.lay,1,function(a)euc.dist(matrix(c(mean(grid.lay[,1]),mean(grid.lay[,2])),1,2),a))
+#   max.dist<-grid.lay[,3][true.rank(grid.lay[,3])==ps]
+#   g.lay.c<-grid.lay[grid.lay[,3]<=max.dist,]
+#   g.lay.c[,1]<-scale(g.lay.c[,1])[,1]
+#   g.lay.c[,2]<-scale(g.lay.c[,2])[,1]
+#   am.lay[,1]<-scale(am.lay[,1])[,1]
+#   am.lay[,2]<-scale(am.lay[,2])[,1]
+#   distances <- rdist(am.lay[,1:2],g.lay.c[,1:2]) 
+#   sol <- solve_LSAP(t(distances))
+#   am.lay[as.numeric(sol),1:2]<-as.matrix(g.lay.c[,1:2])
+#   
+# }
+# 
+# ##This changes the node size according to in (or out) degree 
+# strengths.out<-strength(am.i6,mode="out")
+# strengths.in<-strength(am.i6,mode="in")
+# vert.sizes<-range01(rank(strengths.in))
+# vert.sizes<-vert.sizes+0.3
+# vert.sizes<-vert.sizes*6
+# 
+# vert.cols<-rep("grey",length(vert.sizes))
+# vert.cols<-as.character(range01(strengths.in))
+# vert.cols<-colfunc(100)[range.use(rank(as.numeric(cut(as.numeric(strengths.in),breaks = 100))),1,100)]
+# 
+# ## Make blue nodes
+# vert.shapes<-"circle"
+# vert.cols.trans<-makeTrans(vert.cols)
+# edge.cols<-makeTrans("darkblue")
+# 
+# ##Can use this section of code to make grey links for any.am.i networks that can be
+# ##included underneath like in the SNA manuscript 1. 
+# # edgew<-E(any.am.i)$weight
+# # if(all(edgew %in% 0:1)){
+# #   edgew<-1} else{
+# #     edgew<-range.use(edgew,0.1,0.5)}
+# # edge.cols<-"grey"
+# # plot.igraph(any.am.i,layout=am.lay,vertex.size=vert.sizes,vertex.label=NA,edge.width=edgew,edge.color=edge.cols,vertex.frame.color=vert.cols.trans,vertex.color=vert.cols.trans,edge.curved=T,add=F,edge.arrow.size=0)
+# 
+# #making grey links
+# edgew<-E(am.i6)$weight
+# if(all(edgew %in% 0:1)){
+#   edgew<-1} else{
+#     edgew<-range.use(edgew,0.1,0.5)}
+# edge.cols<-makeTrans("grey50")
+# 
+# 
+# alpha.vec <- runif(200,0,1)
+# 
+# 
+# ## Figure 1, Panel A
+# plot10 <-  plot.igraph(am.i6,
+#                       layout=am.lay,
+#                       vertex.size=vert.sizes,
+#                       vertex.label=NA,
+#                       edge.width=edgew,
+#                       edge.color=edge.cols,
+#                       vertex.frame.color=V(am.i6)$vertex.frame.color,
+#                       vertex.color = adjustcolor(V(am.i6)$color, alpha.f = .8), 
+#                       vertex.shape=V(am.i6)$shape,
+#                       vert.cols.trans=vert.cols.trans, 
+#                       edge.arrow.width=1.9,
+#                       edge.arrow.size=0.25,
+#                       edge.curved=T,
+#                       main = "Fishing finances")
+# 
+# quartz.save(plot10,  file = "Fishing_finances.tiff",type = "tiff", device = dev.cur(), dpi = 600, width = 12, height = 12)
+# 
+# 
+# 
+# ## Pull out the hiring new crew network and convert it to an adjacency graph
+# am.u<-resp.just.infos[["nominee_hiring_new_crew_captains"]]
+# am.i<-graph.adjacency(am.u,mode=("directed"),diag=F,weighted=T) #igraph - creates a graph for plotting
+# 
+# ## To understand the network size
+# E(am.i) # network size by edges or links
+# V(am.i) # network size by vertices or nodes
+# ## Initial plot of sea turtle bycatch data
+# 
+# ## Calculate the average distance across the network
+# mean_distance(am.i, directed = T) #4.8 contacts on average across the network 
+# ## Calculate the centralisation
+# centr_degree(am.i, mode = "in", normalized = T) # 5.1% centralised around one node
+# ## Calcuate the network density (of all posible ties how many ties are present)
+# edge_density(am.i, loops = F) # 0.97% of possible ties are present
+# ## Calculate the degree centrality of each node
+# degree(am.i)
+# ## Calculate the mean degree centrality
+# mean(degree(am.i)) # 3.18
+# 
+# 
+# ## Add node attributes of interest to the network
+# 
+# ## Set vertex attributes of interest from the regressions
+# am.i2 <- set_vertex_attr(am.i, "vessel", value = resp.inds.info$vessel_type)
+# am.i3 <- set_vertex_attr(am.i2, "resp", value = as.character(resp.inds.info$respondent))
+# am.i4 <- set_vertex_attr(am.i3, "TechAware", value = resp.inds.info$aware_of_technologies_being_introduced)
+# am.i5 <- set_vertex_attr(am.i4, "prodelphinus", value = resp.inds.info$prodelphinus_cooperative_member)
+# am.i6 <- set_vertex_attr(am.i5, "perception", value = resp.inds.info$perception_of_bycatch_reduction3)
+# am.i7 <- set_vertex_attr(am.i6, "GremioMember", value = resp.inds.info$No_gremio)
+# am.i8 <- set_vertex_attr(am.i7, "President", value = resp.inds.info$Gremio_president)
+# am.i9 <- set_vertex_attr(am.i8, "Age", value = resp.inds.info$skip_age)
+# 
+# 
+# vertex_attr(am.i6)
+# 
+# ## set layout of the network
+# m <- layout_nicely(am.i6) 
+# 
+# ## set text size of labelled vertices/nodes
+# # V(am.i5)$label.cex = 0.4 
+# 
+# ## set colour of vertex attribute according to vessel type
+# # V(am.i6)$color <- ifelse(V(am.i6)$vessel == 1, "dodgerblue", "tan4")
+# # V(am.i6)$vertex.frame.color <- ifelse(V(am.i6)$prodelphinus == 1, "darkblue", "tan4")
+# V(am.i6)$color <- ifelse(V(am.i6)$perception == 1, "#AAC2D5", 
+#                          ifelse(V(am.i6)$perception == 0, "#DEF7F8",
+#                                 ifelse(V(am.i6)$perception == 3,"#DB8544","#2E609F")))
+# 
+# 
+# ## set shape of vertex attribute according to bycatch reduction cooperative members 
+# V(am.i6)$shape <- ifelse(V(am.i6)$vessel == 2, "circle", "square")
+# V(am.i6)$shape
+# 
+# ## set shape of vertex attribute according to bycatch reduction cooperative members 
+# V(am.i6)$vertex.frame.color <- ifelse(V(am.i6)$TechAware == 1, "#000000", "#FF0000")
+# 
+# ## red C60000
+# 
+# ## Figure 1. Panel A. 
+# ## Here I am using Josh's code to set up an illustrative network to incorporate 
+# ## some node attributes of interest based on the regression analysis.
+# 
+# # display.contexts<-c("Gear","Weather","Location","Activity","T. Bycatch", "Tech.", "Regs.","Finance","Capt.")
+# # short.contexts<-short.names[4:12]
+# # short.contexts.t1<-c("turtle",short.contexts[!short.contexts=="turtle"])
+# # display.contexts.t1<-c("T. Bycatch",display.contexts[!display.contexts=="T. Bycatch"])
+# 
+# colfunc<- colorRampPalette(c('grey','darkgreen'))
+# 
+# circlay<-T #whether network should be circular
+# any.lay<-T #whether all networks in loop should have the same layout
+# 
+# ##set the size of 
+# dev.new(height=7.5,width=7);par(mar=c(0,0,1,0));par(mfrow=c(1,1))
+# 
+# am.u<-resp.just.infos[["nominee_hiring_new_crew_captains"]]
+# am.i<-graph.adjacency(am.u,mode=("directed"),diag=F,weighted=T) #igraph - creates a graph for plotting
+# 
+# any.am.u<-any.am[rownames(am.u),colnames(am.u)]
+# any.am.i<-graph.adjacency(any.am.u,mode=("directed"),diag=F,weighted=T) #igraph
+# 
+# 
+# if(!any.lay){ 
+#   am.lay<-layout.fruchterman.reingold(am.i6)}
+# 
+# if(any.lay){
+#   am.lay<-layout.fruchterman.reingold(any.am.i)}
+# 
+# if(circlay==T){ #whether to keep a circle layout
+#   
+#   ps<-nrow(am.lay)
+#   dim.tl<-ceiling(sqrt(ps))*2 
+#   xpoints1<-floor(-dim.tl/2):ceiling(dim.tl/2)
+#   
+#   xpoints2<-xpoints1+0.5
+#   ypoints1<-xpoints1
+#   ypoints2<-xpoints2
+#   grid.lay1<-expand.grid(xpoints2,ypoints1)
+#   grid.lay2<-expand.grid(xpoints1,ypoints2)
+#   grid.lay3<-expand.grid(xpoints1,ypoints1)
+#   grid.lay4<-expand.grid(xpoints2,ypoints2)
+#   grid.lay<-rbind(grid.lay1,grid.lay2,grid.lay3,grid.lay4)
+#   grid.lay[,1]<-jitter(grid.lay[,1],1)
+#   grid.lay[,2]<-jitter(grid.lay[,2],1)
+#   euc.dist <- function(x1, x2) sqrt(sum((x1 - x2) ^ 2))
+#   grid.lay[,3]<-apply(grid.lay,1,function(a)euc.dist(matrix(c(mean(grid.lay[,1]),mean(grid.lay[,2])),1,2),a))
+#   max.dist<-grid.lay[,3][true.rank(grid.lay[,3])==ps]
+#   g.lay.c<-grid.lay[grid.lay[,3]<=max.dist,]
+#   g.lay.c[,1]<-scale(g.lay.c[,1])[,1]
+#   g.lay.c[,2]<-scale(g.lay.c[,2])[,1]
+#   am.lay[,1]<-scale(am.lay[,1])[,1]
+#   am.lay[,2]<-scale(am.lay[,2])[,1]
+#   distances <- rdist(am.lay[,1:2],g.lay.c[,1:2]) 
+#   sol <- solve_LSAP(t(distances))
+#   am.lay[as.numeric(sol),1:2]<-as.matrix(g.lay.c[,1:2])
+#   
+# }
+# 
+# ##This changes the node size according to in (or out) degree 
+# strengths.out<-strength(am.i6,mode="out")
+# strengths.in<-strength(am.i6,mode="in")
+# vert.sizes<-range01(rank(strengths.in))
+# vert.sizes<-vert.sizes+0.3
+# vert.sizes<-vert.sizes*6
+# 
+# vert.cols<-rep("grey",length(vert.sizes))
+# vert.cols<-as.character(range01(strengths.in))
+# vert.cols<-colfunc(100)[range.use(rank(as.numeric(cut(as.numeric(strengths.in),breaks = 100))),1,100)]
+# 
+# ## Make blue nodes
+# vert.shapes<-"circle"
+# vert.cols.trans<-makeTrans(vert.cols)
+# edge.cols<-makeTrans("darkblue")
+# 
+# ##Can use this section of code to make grey links for any.am.i networks that can be
+# ##included underneath like in the SNA manuscript 1. 
+# # edgew<-E(any.am.i)$weight
+# # if(all(edgew %in% 0:1)){
+# #   edgew<-1} else{
+# #     edgew<-range.use(edgew,0.1,0.5)}
+# # edge.cols<-"grey"
+# # plot.igraph(any.am.i,layout=am.lay,vertex.size=vert.sizes,vertex.label=NA,edge.width=edgew,edge.color=edge.cols,vertex.frame.color=vert.cols.trans,vertex.color=vert.cols.trans,edge.curved=T,add=F,edge.arrow.size=0)
+# 
+# #making grey links
+# edgew<-E(am.i6)$weight
+# if(all(edgew %in% 0:1)){
+#   edgew<-1} else{
+#     edgew<-range.use(edgew,0.1,0.5)}
+# edge.cols<-makeTrans("grey50")
+# 
+# 
+# alpha.vec <- runif(200,0,1)
+# 
+# 
+# ## Figure 1, Panel A
+# plot11 <-  plot.igraph(am.i6,
+#                        layout=am.lay,
+#                        vertex.size=vert.sizes,
+#                        vertex.label=NA,
+#                        edge.width=edgew,
+#                        edge.color=edge.cols,
+#                        vertex.frame.color=V(am.i6)$vertex.frame.color,
+#                        vertex.color = adjustcolor(V(am.i6)$color, alpha.f = .8), 
+#                        vertex.shape=V(am.i6)$shape,
+#                        vert.cols.trans=vert.cols.trans, 
+#                        edge.arrow.width=1.9,
+#                        edge.arrow.size=0.25,
+#                        edge.curved=T,
+#                        main = "Hiring new crew", element_text(size=12))
+# 
+# quartz.save(plot11,  file = "Hiring_new_crew.tiff",type = "tiff", device = dev.cur(), dpi = 600, width = 12, height = 12)
+# 
+# 
+# ## Set the layout for the figure
+# par(mfrow=c(3,3))
+# 
+# ## Turn off the layout
+# dev.off()
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# 
+# bm.u<-resp.just.infos[["nominee_bycatch_turtle_activity"]]
+# bm.i<-graph.adjacency(bm.u,mode=("directed"),diag=F,weighted=T) #igraph - creates a graph for plotting
+# 
+# ## To understand the network size
+# E(bm.i) # network size by edges or links
+# V(bm.i) # network size by vertices or nodes
+# ## Initial plot of sea turtle bycatch data
+# 
+# ## Calculate the average distance across the network
+# mean_distance(bm.i, directed = T) #5.13 contacts on average across the network 
+# ## Calculate the centralisation
+# centr_degree(bm.i, mode = "in", normalized = T) # 6.8% centralised around one node
+# ## Calcuate the network density (of all posible ties how many ties are present)
+# edge_density(bm.i, loops = F) # 1.1% of possible ties are present
+# ## Calculate the degree centrality of each node
+# degree(bm.i)
+# ## Calculate the mean degree centrality
+# mean(degree(bm.i)) # 3.68
+# 
+# 
+# ## Add node attributes of interest to the network
+# 
+# ## Set vertex attributes of interest from the regressions
+# bm.i2 <- set_vertex_attr(bm.i, "vessel", value = resp.inds.info$vessel_type)
+# bm.i3 <- set_vertex_attr(bm.i2, "resp", value = as.character(resp.inds.info$respondent))
+# bm.i4 <- set_vertex_attr(bm.i3, "Gremio", value = resp.inds.info$Gremio)
+# bm.i5 <- set_vertex_attr(bm.i4, "prodelphinus", value = resp.inds.info$prodelphinus_cooperative_member)
+# bm.i6 <- set_vertex_attr(bm.i5, "perception", value = resp.inds.info$perception_of_bycatch_reduction2)
+# bm.i7 <- set_vertex_attr(bm.i6, "President", value = resp.inds.info$Gremio_president)
+# bm.i8 <- set_vertex_attr(bm.i7, "Age", value = resp.inds.info$skip_age)
+# bm.i9 <- set_vertex_attr(bm.i8, "income", value = resp.inds.info$Mean_monthly_income)
+# 
+# 
+# vertex_attr(bm.i9)
+# 
+# ## set layout of the network
+# m <- layout_nicely(bm.i9) 
+# 
+# ## set text size of labelled vertices/nodes
+# # V(am.i5)$label.cex = 0.4 
+# 
+# ## set colour of vertex attribute according to vessel type
+# # V(am.i6)$color <- ifelse(V(am.i6)$vessel == 1, "dodgerblue", "tan4")
+# # V(bm.i4)$vertex.frame.color <- ifelse(V(bm.i4)$prodelphinus == 1, "darkblue", "tan4")
+# V(bm.i9)$color <- ifelse(V(bm.i9)$perception == 1, "#F2DE75", 
+#                          ifelse(V(bm.i9)$perception == 2, "#CEAB27",
+#                                 ifelse(V(bm.i9)$perception == 3,"#D5D5D3", "#23271C")))
+# 
+# V(bm.i9)$color
+# 
+# ## set shape of vertex attribute according to bycatch reduction cooperative members 
+# V(bm.i9)$shape <- ifelse(V(bm.i9)$President == 1, "circle", "circle")
+# V(bm.i9)$shape
+# 
+# ## Figure 1. Panel A. 
+# ## Here I am using Josh's code to set up an illustrative network to incorporate 
+# ## some node attributes of interest based on the regression analysis.
+# 
+# # display.contexts<-c("Gear","Weather","Location","Activity","T. Bycatch", "Tech.", "Regs.","Finance","Capt.")
+# # short.contexts<-short.names[4:12]
+# # short.contexts.t1<-c("turtle",short.contexts[!short.contexts=="turtle"])
+# # display.contexts.t1<-c("T. Bycatch",display.contexts[!display.contexts=="T. Bycatch"])
+# 
+# # colfunc<- colorRampPalette(c('grey','darkblue'))
+# 
+# circlay<-T #whether network should be circular
+# any.lay<-T #whether all networks in loop should have the same layout
+# 
+# ##set the size of 
+# dev.new(height=7.5,width=7);par(mar=c(0,0,1,0));par(mfrow=c(1,1))
+# 
+# # am.u<-resp.just.infos[["nominee_bycatch_turtle_activity"]]
+# # am.i<-graph.adjacency(am.u,mode=("directed"),diag=F,weighted=T) #igraph - creates a graph for plotting
+# 
+# any.bm.u<-any.am[rownames(bm.u),colnames(bm.u)]
+# any.bm.i<-graph.adjacency(any.bm.u,mode=("directed"),diag=F,weighted=T) #igraph
+# 
+# 
+# if(!any.lay){ 
+#   bm.lay<-layout.fruchterman.reingold(bm.i9)}
+# 
+# if(any.lay){
+#   bm.lay<-layout.fruchterman.reingold(any.bm.i)}
+# 
+# if(circlay==T){ #whether to keep a circle layout
+#   
+#   ps<-nrow(bm.lay)
+#   dim.tl<-ceiling(sqrt(ps))*2 
+#   xpoints1<-floor(-dim.tl/2):ceiling(dim.tl/2)
+#   
+#   xpoints2<-xpoints1+0.5
+#   ypoints1<-xpoints1
+#   ypoints2<-xpoints2
+#   grid.lay1<-expand.grid(xpoints2,ypoints1)
+#   grid.lay2<-expand.grid(xpoints1,ypoints2)
+#   grid.lay3<-expand.grid(xpoints1,ypoints1)
+#   grid.lay4<-expand.grid(xpoints2,ypoints2)
+#   grid.lay<-rbind(grid.lay1,grid.lay2,grid.lay3,grid.lay4)
+#   grid.lay[,1]<-jitter(grid.lay[,1],1)
+#   grid.lay[,2]<-jitter(grid.lay[,2],1)
+#   euc.dist <- function(x1, x2) sqrt(sum((x1 - x2) ^ 2))
+#   grid.lay[,3]<-apply(grid.lay,1,function(a)euc.dist(matrix(c(mean(grid.lay[,1]),mean(grid.lay[,2])),1,2),a))
+#   max.dist<-grid.lay[,3][true.rank(grid.lay[,3])==ps]
+#   g.lay.c<-grid.lay[grid.lay[,3]<=max.dist,]
+#   g.lay.c[,1]<-scale(g.lay.c[,1])[,1]
+#   g.lay.c[,2]<-scale(g.lay.c[,2])[,1]
+#   bm.lay[,1]<-scale(bm.lay[,1])[,1]
+#   bm.lay[,2]<-scale(bm.lay[,2])[,1]
+#   distances <- rdist(bm.lay[,1:2],g.lay.c[,1:2]) 
+#   sol <- solve_LSAP(t(distances))
+#   bm.lay[as.numeric(sol),1:2]<-as.matrix(g.lay.c[,1:2])
+#   
+# }
+# 
+# ##This changes the node size according to in (or out) degree 
+# strengths.out<-strength(bm.i9,mode="out")
+# strengths.in<-strength(bm.i9,mode="in")
+# vert.sizes<-range01(rank(strengths.in))
+# vert.sizes<-vert.sizes+0.3
+# vert.sizes<-vert.sizes*6
+# 
+# vert.cols<-rep("grey",length(vert.sizes))
+# vert.cols<-as.character(range01(strengths.in))
+# vert.cols<-colfunc(100)[range.use(rank(as.numeric(cut(as.numeric(strengths.in),breaks = 100))),1,100)]
+# 
+# 
+# ##This change the node colour according to a variable of choice
+# node.cols<-colfunc(100)[range.use(rank(as.numeric(cut(as.numeric(income.col),breaks = 100))),1,100)]
+# 
+# ## Make blue nodes
+# vert.shapes<-"circle"
+# vert.cols.trans<-makeTrans(vert.cols)
+# edge.cols<-makeTrans("darkgreen")
+# 
+# ##Can use this section of code to make grey links for any.am.i networks that can be
+# ##included underneath like in the SNA manuscript 1. 
+# # edgew<-E(any.am.i)$weight
+# # if(all(edgew %in% 0:1)){
+# #   edgew<-1} else{
+# #     edgew<-range.use(edgew,0.1,0.5)}
+# # edge.cols<-"grey"
+# # plot.igraph(any.am.i,layout=am.lay,vertex.size=vert.sizes,vertex.label=NA,edge.width=edgew,edge.color=edge.cols,vertex.frame.color=vert.cols.trans,vertex.color=vert.cols.trans,edge.curved=T,add=F,edge.arrow.size=0)
+# 
+# #making grey links
+# edgew<-E(bm.i9)$weight
+# if(all(edgew %in% 0:1)){
+#   edgew<-1} else{
+#     edgew<-range.use(edgew,0.1,0.5)}
+# edge.cols<-makeTrans("grey50")
+# 
+# 
+# 
+# 
+# 
+# ## Figure 1, Panel B
+# plot2b <-  plot.igraph(bm.i9,
+#                        layout=am.lay,
+#                        vertex.size=vert.sizes,
+#                        vertex.label=NA,
+#                        edge.width=edgew,
+#                        edge.color=edge.cols,
+#                        # vertex.frame.color=V(bm.i4)$vertex.frame.color,
+#                        vertex.color=node.cols,
+#                        vertex.shape=V(bm.i9)$shape,
+#                        edge.arrow.width=1.9,
+#                        edge.arrow.size=0.25,
+#                        edge.curved=T)
+# 
+# quartz.save(plot2b, file = "Figure_S2.png", type = "png", device = dev.cur(), dpi = 600, width = 12, height = 12)
+# 
+# 
+# plot2c <-  plot.igraph(bm.i9,
+#                       layout=am.lay,
+#                       vertex.size=vert.sizes,
+#                       vertex.label=NA,
+#                       edge.width=edgew,
+#                       edge.color=edge.cols,
+#                       # vertex.frame.color=V(bm.i4)$vertex.frame.color,
+#                       vertex.color=node.cols,
+#                       # vertex.shape=V(bm.i9)$shape,
+#                       edge.arrow.width=1.9,
+#                       edge.arrow.size=0.25,
+#                       edge.curved=T)
+# 
+# quartz.save(plot2c, file = "Figure_S2.png", type = "png", device = dev.cur(), dpi = 600, width = 12, height = 12)
+
+## END
+
+
+
+
+

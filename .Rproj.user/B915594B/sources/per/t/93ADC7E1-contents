@@ -1,0 +1,35 @@
+#####################################################
+##                                                 ##
+##   Pinniped Fisheries Interaction Meta-Analysis  ##
+##                                                 ##
+##           Kroodsma et al. 2018 data             ##
+##                                                 ##
+##               JJ- May 26th 2022                 ##
+##                                                 ##
+#####################################################
+rm(list = ls())
+options(width = 100)
+
+library(raster)
+library(rasterize)
+library(tidyverse)
+library(sp)
+
+##______________________________________________________________________________
+#### 1. Test with 01/01/2012 ####
+
+world_raster <- raster(xmn=-180, xmx=180, ymn=-90, ymx=90, resolution=c(5,5))
+dat2 <- read.csv("../../../Global_fishing_watch_data/mmsi-daily-csvs-10-v2-2012/2012-01-01.csv")
+
+# use rasterize to create desired raster
+r_data <- rasterize(x = dat2[,3:2], # lon-lat data
+                    y = world_raster, # raster object
+                    field = dat2[,6], # vals to fill raster with
+                    fun = sum)
+
+plot(r_data)
+
+
+
+
+

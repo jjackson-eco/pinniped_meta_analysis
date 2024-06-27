@@ -1,0 +1,79 @@
+#####################################################
+##                                                 ##
+##   Pinniped Fisheries Interaction Meta-Analysis  ##
+##                                                 ##
+##           Underlying raster layer plots         ##
+##                                                 ##
+##                 JJ- June 2024                   ##
+##                                                 ##
+#####################################################
+rm(list = ls())
+options(width = 100)
+
+library(raster)
+library(terra)
+library(tidyverse)
+library(patchwork)
+library(MetBrewer)
+library(sf)
+
+##______________________________________________________________________________
+#### 1. Loading raw data ####
+
+## A) Global Fishing data - I am not hosting data publicly, but available from https://globalfishingwatch.org/ 
+GFW_raster_norm <- rast(x = "../../Figures/spatial_raster_data/GFW_raster_norm.tif")
+
+## B) Distance to shore - I am not hosting data publicly, but available from https://oceancolor.gsfc.nasa.gov/resources/docs/distfromcoast/
+coast_proximity <- rast("../../Figures/spatial_raster_data/coast_proximity.tif")
+
+## C) Pinniped data - raster and sf - I am not hosting data publicly, but available from IUCN red list
+pinn_raster <- rast("../../Figures/spatial_raster_data/pinn_raster.tif")
+pinn_all_raster <- rast("../../Figures/spatial_raster_data/pinn_all_raster.tif")
+load("../../Data/pinniped_sf_dat.RData")
+
+## D) overall world map - I am not hosting data, but this publicly available from https://www.naturalearthdata.com/
+world_map <- st_read("../../Figures/Natural_Earth_Land_data/ne_10m_land.shp")
+
+## Converting rasters to data frames with terra
+GFW_df <- as.data.frame(x = GFW_raster_norm, xy = TRUE)
+coast_df <- as.data.frame(x = coast_proximity, xy = TRUE)
+pinn_df <- as.data.frame(x = pinn_raster, xy = TRUE)
+pinn_all_df <- as.data.frame(x = pinn_all_raster, xy = TRUE)
+
+##______________________________________________________________________________
+#### 2. Plots ####
+
+## A) Global Fishing data
+GFW_plot <- ggplot() +
+  geom_sf(data = world_map, fill = "lightgrey", colour = "lightgrey", size = 0.01) +
+  geom_raster(data = GFW_df, aes(x = x, y = y, fill = GFW_raster_norm)) +
+  scale_fill_viridis_c() +
+  guides(fill = guide_colorbar(barheight = 8, barwidth = 2)) +
+  labs(fill = "Fishing effort", tag = "a)") +
+  theme_void()
+
+## B) Distance to shore
+coast_proximity_plot <- ggplot() +
+  geom_sf(data = world_map, fill = "white", colour = "white", size = 0.01) +
+  geom_tile(data = coast_df, aes(x = x, y = y, fill = coast_proximity)) +
+  scale_fill_viridis_c(option = "C") +
+  guides(fill = guide_colorbar(barheight = 8, barwidth = 2)) +
+  labs(fill = "Proximity\nto coast", tag = "c)") +
+  theme_void()
+
+## C) Pinnipeds
+pinn_df <- filter(pinn_df, pinn_raster > 0.01)
+pinn_all_df <- filter(pinn_all_df, pinn_all_raster > 0.01)
+
+pinn_all_plot <- ggplot() +
+  geom_sf(data = world_map, fill = "lightgrey", colour = "lightgrey", size = 0.01) +
+  geom_tile(data = pinn_all_df, aes(x = x, y = y, fill = pinn_all_raster),
+            show.legend = F) +
+  scale_fill_viridis_c(begin = 0, end = 0.4) +
+  labs(tag = "b)") +
+  theme_void()
+
+ggsave(GFW_plot / pinn_all_plot / coast_proximity_plot, 
+       filename = "output/figS4.jpeg",
+       width = 25, height = 19, units = "cm", dpi = 1200)
+

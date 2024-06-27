@@ -1,0 +1,299 @@
+#####################################################
+##                                                 ##
+##   Pinniped Fisheries Interaction Meta-Analysis  ##
+##                                                 ##
+##             Wrangling Coordinates               ##
+##                                                 ##
+##              JJ- June 26th 2024                 ##
+##                                                 ##
+#####################################################
+rm(list = ls())
+options(width = 100)
+
+library(tidyverse)
+library(MetBrewer)
+library(patchwork)
+library(sp)
+library(sf)
+library(raster)
+
+int_colour <- MetPalettes$Hokusai2[[1]][3]
+med_colour <- MetPalettes$Hokusai3[[1]][2]
+dmg_colour <- MetPalettes$Hokusai2[[1]][6]
+
+##______________________________________________________________________________
+#### 1. Loading and wrangling ####
+
+## Interaction data - updated coordinates for manuscript write up
+pinnrev <- read_csv("data/scoping_data_extraction_20240412.csv") %>% 
+  mutate(spp = paste0(genus, " ", species))
+
+glimpse(pinnrev)
+
+## Operational interaction data 
+load("data/op_interaction.RData", verbose = TRUE)
+
+## non-standardised data
+load("data/survey_data_July2022.RData")
+old_survey_data <- survey_data
+
+nonstn_data <- read_csv("data/non_standardised_data_20230112.csv") %>% 
+  left_join(dplyr::select(old_survey_data, c(1,2,5)), by= "acc_no") 
+
+nonstn_data$modality
+nonstn_data[c(13,14,16), "modality"] <- c("Proportion of fishers", 
+                                          "Self reporting", "Self reporting")
+
+nonstn_data[c(8:10,15),5] <- c("Gonzalez and de Larrinoa 2013",
+                               "Gonzalez and de Larrinoa 2013",
+                               "Guclusoy 2008",
+                               "Sepulveda and Oliva 2005")
+
+nonstn_data[c(13,14,16),"study_name"] <- c("Mo et al. 2011", 
+                                           "Karamanlidis et al. 2020",
+                                           "Kauppinen et al. 2005")
+
+##______________________________________________________________________________
+#### 2. Coordinate wrangling ####
+
+## 2a. Northern Latitude
+lat_N <- pinnrev %>% pull(lat_N)
+
+lat_N_ds <- unlist(lapply(str_split(lat_N, pattern = " "), function(x){
+  if(length(x) < 3 | all(is.na(x))){lat_ds = NA}
+  else if(as.numeric(x[1]) < 0){
+    lat_ds = paste0(abs(as.numeric(x[1])), "d", x[2], "'", x[3], "\"S")
+    lat_ds = as.numeric(sp::char2dms(lat_ds))}
+  else{lat_ds = paste0(x[1], "d", x[2], "'", x[3], "\"N")
+       lat_ds = as.numeric(sp::char2dms(lat_ds))}
+  return(lat_ds)
+  }))
+
+## 2b. Southern Latitude
+lat_S <-  pinnrev %>% pull(lat_S)
+
+lat_S_ds <- unlist(lapply(str_split(lat_S, pattern = " "), function(x){
+  if(length(x) < 3 | all(is.na(x))){lat_ds = NA}
+  else if(as.numeric(x[1]) < 0){
+    lat_ds = paste0(abs(as.numeric(x[1])), "d", x[2], "'", x[3], "\"S")
+    lat_ds = as.numeric(sp::char2dms(lat_ds))}
+  else{lat_ds = paste0(x[1], "d", x[2], "'", x[3], "\"N")
+  lat_ds = as.numeric(sp::char2dms(lat_ds))}
+  return(lat_ds)
+}))
+
+## 2c. Western Longitude
+lon_W <- pinnrev %>% pull(long_W)
+
+lon_W_ds <- unlist(lapply(str_split(lon_W, pattern = " "), function(x){
+  if(length(x) < 3 | all(is.na(x))){lon_ds = NA}
+  else if(as.numeric(x[1]) < 0){
+    lon_ds = paste0(abs(as.numeric(x[1])), "d", x[2], "'", x[3], "\"W")
+    lon_ds = as.numeric(sp::char2dms(lon_ds))}
+  else{lon_ds = paste0(x[1], "d", x[2], "'", x[3], "\"E")
+  lon_ds = as.numeric(sp::char2dms(lon_ds))}
+  return(lon_ds)
+}))
+
+## 2d. Eastern Longitude
+lon_E <- pinnrev %>% pull(long_E)
+
+lon_E_ds <- unlist(lapply(str_split(lon_E, pattern = " "), function(x){
+  if(length(x) < 3 | all(is.na(x))){lon_ds = NA}
+  else if(as.numeric(x[1]) < 0){
+    lon_ds = paste0(abs(as.numeric(x[1])), "d", x[2], "'", x[3], "\"W")
+    lon_ds = as.numeric(sp::char2dms(lon_ds))}
+  else{lon_ds = paste0(x[1], "d", x[2], "'", x[3], "\"E")
+  lon_ds = as.numeric(sp::char2dms(lon_ds))}
+  return(lon_ds)
+}))
+
+##______________________________________________________________________________
+#### 3. Converting to spatial polygons ####
+
+# Going through each of the coordinates and turning them into spatial polygons
+spatial_poly_list <-lapply(X = 1:length(lat_N_ds), FUN = function(x){
+  
+  print(x)
+
+  # curent coordiantes
+  clon_W = lon_W_ds[x]
+  clon_E = lon_E_ds[x]
+  clat_N = lat_N_ds[x]
+  clat_S = lat_S_ds[x] 
+  
+  # if they are the same, make them super small
+  if(clon_W > clon_E){clon_E = clon_E + 0.05}
+  if(clat_S > clat_N){clat_N = clat_N + 0.05}
+  
+  # convert
+  cpoly = as(raster::extent(clon_W, clon_E, clat_S, clat_N), "SpatialPolygons")
+  proj4string(cpoly) <- "+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs"
+  cdat = pinnrev[x,c("acc_no","n_int","n_dmg", "x_norm")]
+  SpatialPolygonsDataFrame(cpoly, data = cdat)
+})
+
+# Binding all the data together to one spatial polygons dtaaframe
+pinnrev_spatial <- bind_rows(lapply(X = 1:length(spatial_poly_list), FUN = function(x){
+  sf::st_as_sf(spatial_poly_list[[x]])
+}))
+
+pinnrev_sf <- sf::st_as_sf(pinnrev_spatial)
+
+save(pinnrev_sf, file = "../../Data/pinnrev_sf.RData")
+
+# Taking centroid points - having to add 17:19 and 22 separately
+pinnrev_centroids <- st_centroid(pinnrev_sf[-c(13:15,19),]) %>% 
+  mutate(n = if_else(is.na(n_int) == TRUE, as.numeric(n_dmg), n_int))
+
+point_studies <- pinnrev %>% 
+  slice(13:15,19) %>% 
+  mutate(lat = lat_N_ds[c(13:15,19)], lon = lon_E_ds[c(13:15,19)],
+         n = if_else(is.na(n_int) == TRUE, as.numeric(n_dmg), n_int)) %>% 
+  st_as_sf(coords = c("lon", "lat"), 
+           crs = "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0") %>% 
+  dplyr::select(acc_no, n_int, n_dmg, x_norm, geometry, n)
+
+pinnrev_centroids <- bind_rows(pinnrev_centroids, point_studies) %>% 
+  mutate(n_dmg = as.numeric(n_dmg),
+         n_sum = n_int + n_dmg,
+         response = case_when(
+           is.na(n_sum) == TRUE & n_int > 0 ~ "Interaction",
+           is.na(n_sum) == TRUE & n_dmg > 0 ~ "Catch lost",
+           n_sum > 0 ~ "Both"),
+         response = factor(response, levels = c("Interaction", "Catch lost", "Both")))
+
+##______________________________________________________________________________
+#### 4. Survey studies ####
+
+## 2a. Northern Latitude
+lat_N <- nonstn_data %>% pull(lat_N)
+
+lat_N_ds <- unlist(lapply(str_split(lat_N, pattern = " "), function(x){
+  if(length(x) < 3 | all(is.na(x))){lat_ds = NA}
+  else if(as.numeric(x[1]) < 0){
+    lat_ds = paste0(abs(as.numeric(x[1])), "d", x[2], "'", x[3], "\"S")
+    lat_ds = as.numeric(sp::char2dms(lat_ds))}
+  else{lat_ds = paste0(x[1], "d", x[2], "'", x[3], "\"N")
+  lat_ds = as.numeric(sp::char2dms(lat_ds))}
+  return(lat_ds)
+}))
+
+## 2b. Southern Latitude
+lat_S <-  nonstn_data %>% pull(lat_S)
+
+lat_S_ds <- unlist(lapply(str_split(lat_S, pattern = " "), function(x){
+  if(length(x) < 3 | all(is.na(x))){lat_ds = NA}
+  else if(as.numeric(x[1]) < 0){
+    lat_ds = paste0(abs(as.numeric(x[1])), "d", x[2], "'", x[3], "\"S")
+    lat_ds = as.numeric(sp::char2dms(lat_ds))}
+  else{lat_ds = paste0(x[1], "d", x[2], "'", x[3], "\"N")
+  lat_ds = as.numeric(sp::char2dms(lat_ds))}
+  return(lat_ds)
+}))
+
+## 2c. Western Longitude
+lon_W <- nonstn_data %>% pull(long_W)
+
+lon_W_ds <- unlist(lapply(str_split(lon_W, pattern = " "), function(x){
+  if(length(x) < 3 | all(is.na(x))){lon_ds = NA}
+  else if(as.numeric(x[1]) < 0){
+    lon_ds = paste0(abs(as.numeric(x[1])), "d", x[2], "'", x[3], "\"W")
+    lon_ds = as.numeric(sp::char2dms(lon_ds))}
+  else{lon_ds = paste0(x[1], "d", x[2], "'", x[3], "\"E")
+  lon_ds = as.numeric(sp::char2dms(lon_ds))}
+  return(lon_ds)
+}))
+
+## 2d. Eastern Longitude
+lon_E <- nonstn_data %>% pull(long_E)
+
+lon_E_ds <- unlist(lapply(str_split(lon_E, pattern = " "), function(x){
+  if(length(x) < 3 | all(is.na(x))){lon_ds = NA}
+  else if(as.numeric(x[1]) < 0){
+    lon_ds = paste0(abs(as.numeric(x[1])), "d", x[2], "'", x[3], "\"W")
+    lon_ds = as.numeric(sp::char2dms(lon_ds))}
+  else{lon_ds = paste0(x[1], "d", x[2], "'", x[3], "\"E")
+  lon_ds = as.numeric(sp::char2dms(lon_ds))}
+  return(lon_ds)
+}))
+
+# Going through each of the coordinates and turning them into spatial polygons
+spatial_poly_list_survey <-lapply(X = 1:length(lat_N_ds), FUN = function(x){
+  
+  print(x)
+  
+  # curent coordiantes
+  clon_W = lon_W_ds[x]
+  clon_E = lon_E_ds[x]
+  clat_N = lat_N_ds[x]
+  clat_S = lat_S_ds[x] 
+  
+  # if they are the same, make them super small
+  if(clon_W > clon_E){clon_E = clon_E + 0.05}
+  if(clat_S > clat_N){clat_N = clat_N + 0.05}
+  
+  # convert
+  cpoly = as(raster::extent(clon_W, clon_E, clat_S, clat_N), "SpatialPolygons")
+  proj4string(cpoly) <- "+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs"
+  cdat = nonstn_data[x,c("acc_no","x_int","x_dmg")]
+  SpatialPolygonsDataFrame(cpoly, data = cdat)
+})
+
+# Binding all the data together to one spatial polygons dtaaframe
+pinnrev_spatial_survey <- bind_rows(lapply(X = 1:length(spatial_poly_list_survey), FUN = function(x){
+  sf::st_as_sf(spatial_poly_list_survey[[x]])
+}))
+
+# As sf object
+pinnrev_sf_survey <- sf::st_as_sf(pinnrev_spatial_survey)
+
+# centroids of survey data
+pinnrev_centroids_survey <- st_centroid(pinnrev_sf_survey) 
+
+##______________________________________________________________________________
+#### 5. Plots ####
+
+world_map <- st_read("../../Figures/Natural_Earth_Land_data/ne_10m_land.shp")
+eez <- st_read("../../Data/World_EEZ_v11_20191118/eez_v11.shp")
+# # The CRS - Robin projection for curved edges
+# myCRS <- CRS("+proj=robin +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs")
+
+plots_world <- ggplot() +
+  geom_sf(data = world_map, fill = "white", colour = "white", size = 0.01) +
+  geom_sf(data = pinnrev_centroids, shape = 16,
+          aes(size = (n*x_norm)  + 1, colour = response), alpha = 0.6) +
+  geom_sf(data = pinnrev_centroids_survey, aes(colour = "Non-standardised"), 
+          shape = 17, size = 2, alpha = 0.8) +
+  scale_size_continuous(trans = "log10", breaks = c(1,10,100,1000,10000),
+                        limits = c(1,50000), range = c(1,6)) +
+  scale_colour_manual(name = "Data\navailable",
+                      breaks = c("Interaction", "Catch lost", "Both", "Non-standardised"),
+                      values = c(int_colour, dmg_colour, "black", "grey60")) +
+  scale_y_continuous(expand = c(0,0)) + scale_x_continuous(expand = c(0,0)) +
+  guides(colour = guide_legend(keyheight = 2.1,
+                               override.aes = 
+                                 list(alpha = 1, size = 4, 
+                                      shape = c(16, 16, 16, 17))),
+         size = guide_legend(override.aes = list(alpha = 1))) +
+  labs(size = "Days of\nObservation") +
+  theme(panel.grid = element_line(size = 0.2),
+        panel.background = element_rect(fill = "grey90"),
+        legend.key = element_rect(fill = NA),
+        axis.text = element_blank(), axis.ticks = element_blank())
+
+# ggsave(plots_world, filename = "../../Figures/Manuscript_figures/world_map_studies2.pdf", 
+#        width = 27, height = 19, units = "cm")
+
+ggsave(plots_world, filename = "output/world_map_studies.jpeg", 
+       width = 27, height = 19, units = "cm", dpi = 1500)
+
+##______________________________________________________________________________
+#### 6. Save the data ####
+
+save(pinnrev_centroids, pinnrev_centroids_survey,
+     file = "../../Data/pinnrev_centroid_data.RData")
+
+
+
+

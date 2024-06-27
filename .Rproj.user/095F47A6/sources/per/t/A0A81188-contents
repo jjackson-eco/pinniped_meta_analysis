@@ -1,0 +1,290 @@
+#####################################################
+##                                                 ##
+##   Pinniped Fisheries Interaction Meta-Analysis  ##
+##                                                 ##
+##        Spatial raster layer preparation         ##
+##                                                 ##
+##               JJ- Jun 21st 2023                 ##
+##                                                 ##
+#####################################################
+rm(list = ls())
+options(width = 100)
+memory.limit(size = 60000) ## Increase memory limit to allocate bigger vectors for the rasters
+
+library(raster)
+library(rasterize)
+library(tidyverse)
+library(patchwork)
+library(MetBrewer)
+library(sf)
+
+## need high computation power for large(ish) raster files
+
+##______________________________________________________________________________
+#### 1. Loading raw data ####
+
+## A) Global Fishing data
+GFW_raster_0.5 <- readRDS("../../Data/GFW_raster_0.5.RData")
+
+## B) Distance to shore
+coast_dist_raw <- raster("../../../Coastal_data/GMT_intermediate_coast_distance_01d.tif")
+
+## C) 'Pinniped data'
+load("../../Data/pinniped_sf_dat.RData")
+
+##______________________________________________________________________________
+#### 2. Wrangling ####
+
+## A) GFW - log10 scale and normalise (0-1, 1 = highest effort)
+GFW_raster_norm <- log10(GFW_raster_0.5 + 1)/maxValue(log10(GFW_raster_0.5 + 1))
+GFW_raster_norm[is.na(GFW_raster_norm) == TRUE] <- 0 # setting NA to 0 - essentially means there wasn't recording/fishing
+
+## B) Distance to shore - convert to 0.5 grid, only marine and normalise (0-1, 1 = closest)
+summary(coast_dist_raw)
+
+coast_dist_0.5 <- aggregate(coast_dist_raw, fact = 50)
+res(coast_dist_0.5)
+
+coast_dist_0.5[coast_dist_0.5 < 0] <- NA
+coast_proximity <- 1 - (log10(coast_dist_0.5 + 1)/maxValue(log10(coast_dist_0.5 + 1)))
+
+## C) Pinniped data - project on to 0.5 x 0.5 rasterhttp://127.0.0.1:18305/graphics/plot_zoom_png?width=1200&height=900
+
+# The 0.5 grid to project on to
+world_raster <- raster(xmn = -180, xmx = 180,
+                       ymn = -90, ymx = 90,
+                       resolution = c(0.5,0.5))
+
+pinniped_lc_sf$dat <- 1
+pinn_raster <- rasterize(pinniped_lc_sf, world_raster, "dat")
+pinn_raster[is.na(pinn_raster) == TRUE] <- 0.01 # setting non points to a 1% chance of being spotted
+
+pinniped_sf_dat$dat <- 1
+pinn_all_raster <- rasterize(pinniped_sf_dat, world_raster, "dat")
+pinn_all_raster[is.na(pinn_all_raster) == TRUE] <- 0.01 # setting non points to a 1% chance of being spotted
+
+##______________________________________________________________________________
+#### 3. Creating and saving combined rasters ####
+
+potential_pinniped_conflict <- 
+  GFW_raster_norm * coast_proximity * pinn_raster
+
+writeRaster(x = potential_pinniped_conflict, 
+            filename = "../../../conflict_rasters/potential_pinniped_conflict.tif")
+
+potential_pinniped_conflict_noshore <- 
+  GFW_raster_norm * pinn_raster
+
+writeRaster(x = potential_pinniped_conflict_noshore, 
+            filename = "../../../conflict_rasters/potential_pinniped_conflict_noshore.tif")
+
+potential_pinniped_conflict_nogfw <- 
+  pinn_raster * coast_proximity
+
+writeRaster(x = potential_pinniped_conflict_nogfw, 
+            filename = "../../../conflict_rasters/potential_pinniped_conflict_nogfw.tif")
+
+potential_pinniped_conflict_allpin <- 
+  GFW_raster_norm * coast_proximity * pinn_all_raster
+
+writeRaster(x = potential_pinniped_conflict_allpin, 
+            filename = "../../../conflict_rasters/potential_pinniped_conflict_allpin.tif")
+
+##______________________________________________________________________________
+#### 4. Linking to operational interaction data ####
+
+# # my crs
+# myCRS <- CRS("+proj=robin +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs")
+# crs(potential_pinniped_conflict) <- myCRS
+
+## Load data
+load("../../Data/pinnrev_sf.RData")
+load("../../Data/op_interaction.RData")
+load("../../Data/pinnrev_centroid_data.RData")
+
+## extract raster values for the study geometries
+pinnrev_mnconf <- pinnrev_sf %>% 
+  mutate(potential_conflict = raster::extract(potential_pinniped_conflict,
+                     pinnrev_sf, fun = mean, df = TRUE, na.rm = TRUE)[,2]) %>% 
+  dplyr::select(acc_no, potential_conflict) %>% 
+  as_tibble()
+
+## Adding to operational interaction data
+op_interaction <- op_interaction %>% 
+  left_join(x = ., y = pinnrev_mnconf, by = "acc_no")
+
+##______________________________________________________________________________
+#### 5. Creating nice plots ####
+
+# overall world map
+world_map <- st_read("../../Figures/Natural_Earth_Land_data/ne_10m_land.shp")
+
+## GFW
+# crs(GFW_raster_norm) <- myCRS
+GFW_raster_norm_spdf <- as(GFW_raster_norm, "SpatialPixelsDataFrame")
+GFW_raster_norm_df <- as.data.frame(GFW_raster_norm_spdf)
+
+GFW_plot <- ggplot() +
+  geom_sf(data = world_map, fill = "lightgrey", colour = "lightgrey", size = 0.01) +
+  geom_tile(data = GFW_raster_norm_df, aes(x = x, y = y, fill = layer)) +
+  scale_fill_viridis_c() +
+  guides(fill = guide_colorbar(barheight = 10, barwidth = 2)) +
+  labs(fill = "Fishing effort") +
+  theme_void()
+
+ggsave(GFW_plot, filename = "../../Figures/extraction_20230112/GFW_index.jpeg",
+       width = 25, height = 19, units = "cm", dpi = 1000)
+
+## Distance to shore
+# crs(coast_proximity) <- myCRS
+coast_proximity_spdf <- as(coast_proximity, "SpatialPixelsDataFrame")
+coast_proximity_df <- as.data.frame(coast_proximity_spdf)
+
+coast_proximity_plot <- ggplot() +
+  geom_sf(data = world_map, fill = "lightgrey", colour = "lightgrey", size = 0.01) +
+  geom_tile(data = coast_proximity_df, aes(x = x, y = y, fill = layer)) +
+  scale_fill_viridis_c(option = "C") +
+  guides(fill = guide_colorbar(barheight = 10, barwidth = 2)) +
+  labs(fill = "Proximity\nto coast") +
+  theme_void()
+
+ggsave(coast_proximity_plot, filename = "../../Figures/extraction_20230112/coast_proximity_index.jpeg",
+       width = 25, height = 19, units = "cm", dpi = 1000)
+
+## Non-threatened pinniped presence
+pinn_raster[pinn_raster == 0.01] <- NA # setting back just for plot
+# crs(pinn_raster) <- myCRS
+pinn_raster_spdf <- as(pinn_raster, "SpatialPixelsDataFrame")
+pinn_raster_df <- as.data.frame(pinn_raster_spdf)
+
+pinn_raster_plot <- ggplot() +
+  geom_sf(data = world_map, fill = "lightgrey", colour = "lightgrey", size = 0.01) +
+  geom_tile(data = pinn_raster_df, aes(x = x, y = y, fill = layer),
+            show.legend = F) +
+  scale_fill_viridis_c(begin = 0, end = 0.6) +
+  theme_void()
+
+ggsave(pinn_raster_plot, filename = "../../Figures/extraction_20230112/LC_pinniped_map.jpeg",
+       width = 25, height = 19, units = "cm", dpi = 1000)
+
+## Pinniped conflict potential
+pal <- MetPalettes$OKeeffe2[[1]]
+# crs(potential_pinniped_conflict) <- myCRS
+potential_pinniped_conflict_spdf <- as(potential_pinniped_conflict, "SpatialPixelsDataFrame")
+potential_pinniped_conflict_df <- as.data.frame(potential_pinniped_conflict_spdf)
+
+potential_pinniped_conflict_plot <- ggplot() +
+  geom_sf(data = world_map, fill = "lightgrey", colour = "lightgrey", size = 0.01) +
+  geom_tile(data = potential_pinniped_conflict_df, aes(x = x, y = y, fill = layer)) +
+  scale_fill_gradient2(low = pal[1], mid = pal[4], high = pal[7]) +
+  guides(fill = guide_colorbar(barheight = 10, barwidth = 2)) +
+  labs(fill = "Potential for\npinniped-fishery\ninteractions") +
+  theme_void()
+
+ggsave(potential_pinniped_conflict_plot, 
+       filename = "../../Figures/extraction_20230112/pinniped_conflict_index.jpeg",
+       width = 25, height = 19, units = "cm", dpi = 1000)
+
+pinniped_conflict_studies <- ggplot() +
+  #geom_sf(data = world_map, fill = "lightgrey", colour = "lightgrey", size = 0.01) +
+  geom_tile(data = potential_pinniped_conflict_df, aes(x = x, y = y, fill = layer)) +
+  geom_sf(data = pinnrev_centroids, colour = "black", 
+          size = 2.5, shape = 1, alpha = 1) +
+  geom_sf(data = pinnrev_centroids_survey, colour = "black", 
+          size = 2, shape = 2, alpha = 1) + 
+  scale_fill_gradient2(low = "#4EF3C3", mid = "#44E6BB", 
+                       high = "#194B5D") +
+  guides(fill = guide_colorbar(barheight = 10, barwidth = 2)) +
+  labs(fill = "Potential for\npinniped-fishery\ninteractions") +
+  theme_void() 
+
+
+
+"#0D0887FF"
+"#47039FFF"
+"#7301A8FF"
+
+int_colour <- MetPalettes$Hokusai2[[1]][3]
+dmg_colour <- MetPalettes$Hokusai2[[1]][6]
+potential_colour  <- viridis::inferno(10)[6]
+
+int_pc <- ggplot(op_interaction, aes(x = potential_conflict, y = interaction_prop)) +
+  geom_point(colour = int_colour, size = 4, alpha = 0.7) +
+  labs(x = "Potential for pinniped-fishery interactions", 
+       y = "Proportion of days with interactions") +
+  theme_bw(base_size = 13) +
+  theme(panel.grid = element_blank())
+  
+dmg_pc <- ggplot(op_interaction, aes(x = potential_conflict, y = damage_prop)) +
+  geom_point(colour = dmg_colour, size = 4, alpha = 0.7) +
+  labs(x = "Potential for pinniped-fishery interactions", 
+       y = "Proportion of catch lost") +
+  theme_bw(base_size = 13) +
+  theme(panel.grid = element_blank())
+
+## Potential for interactions density + observations
+dat_dens1 <- ggplot(potential_pinniped_conflict_df, aes(x = layer)) +
+  geom_histogram(bins = 20, fill = "black") +
+  geom_vline(data = op_interaction, 
+                 aes(xintercept = potential_conflict), 
+                 colour = potential_colour, alpha = 0.8) +
+  coord_cartesian(xlim = c(0,1)) +
+  labs(x = NULL,
+       y = "Frequency") +
+  theme_bw(base_size = 13) +
+  theme(panel.grid = element_blank())
+
+dat_dens2 <- ggplot(op_interaction, aes(x = potential_conflict, y = "")) +
+  geom_boxplot(fill = potential_colour) +
+  coord_cartesian(xlim = c(0,1)) +
+  labs(x = "Potential for pinniped-fishery interactions",
+       y = "") +
+  theme_bw(base_size = 13) +
+  theme(panel.grid = element_blank())
+
+ggsave(pinniped_conflict_studies,
+       filename = "../../Figures/extraction_20230112/pinniped_conflict_studies.jpeg",
+       width = 25, height = 19, units = "cm", dpi = 1500)
+
+ggsave(int_pc + dmg_pc,
+       filename = "../../Figures/extraction_20230112/pinniped_conflict_op.jpeg",
+       width = 24, height = 10, units = "cm", dpi = 1000)
+
+ggsave(dat_dens1 / dat_dens2 + plot_layout(heights = c(2,1)),
+       filename = "../../Figures/extraction_20230112/pinniped_conflict_distribution.jpeg",
+       width = 18, height = 10, units = "cm", dpi = 1000)
+
+##______________________________________________________________________________
+#### 6. Testing contrast ####
+
+pinniped_conflict_studies1 <- ggplot() +
+  #geom_sf(data = world_map, fill = "lightgrey", colour = "lightgrey", size = 0.01) +
+  geom_tile(data = potential_pinniped_conflict_df, aes(x = x, y = y, fill = layer)) +
+  geom_sf(data = pinnrev_centroids, colour = "black", 
+          size = 2.5, shape = 1, alpha = 1) +
+  geom_sf(data = pinnrev_centroids_survey, colour = "black", 
+          size = 2, shape = 2, alpha = 1) + 
+  scale_fill_gradient2(low = "#4EF3C3", mid = "#44E6BB", 
+                       high = "#194B5D") +
+  guides(fill = guide_colorbar(barheight = 10, barwidth = 2)) +
+  labs(fill = "Potential for\npinniped-fishery\ninteractions") +
+  theme_void() 
+
+pinniped_conflict_studies2 <- ggplot() +
+  #geom_sf(data = world_map, fill = "lightgrey", colour = "lightgrey", size = 0.01) +
+  geom_tile(data = potential_pinniped_conflict_df, aes(x = x, y = y, fill = layer)) +
+  geom_sf(data = pinnrev_centroids, colour = "black", 
+          size = 2.5, shape = 1, alpha = 1) +
+  geom_sf(data = pinnrev_centroids_survey, colour = "black", 
+          size = 2, shape = 2, alpha = 1) + 
+  scale_fill_gradient2(low = "grey99", mid = "grey91", 
+                       high = "#7301A8FF") +
+  guides(fill = guide_colorbar(barheight = 10, barwidth = 2)) +
+  labs(fill = "Potential for\npinniped-fishery\ninteractions") +
+  theme_void() 
+
+ggsave(pinniped_conflict_studies1 / pinniped_conflict_studies2,
+       filename = "../../Figures/extraction_20230112/pinniped_conflict_studies_test.jpeg",
+       width = 25, height = 40, units = "cm", dpi = 1500)
+
+

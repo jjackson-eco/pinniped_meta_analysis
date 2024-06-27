@@ -1,0 +1,88 @@
+#####################################################
+##                                                 ##
+##   Pinniped Fisheries Interaction Meta-Analysis  ##
+##                                                 ##
+##       Non-standardised data investigation       ##
+##                                                 ##
+##             JJ- January 12th 2022               ##
+##                                                 ##
+#####################################################
+rm(list = ls())
+options(width = 100)
+
+library(tidyverse)
+library(patchwork)
+library(flextable)
+library(MetBrewer)
+
+##______________________________________________________________________________
+#### 1. Loading and wrangling ####
+
+## Old data to add names and modality
+load("../../Data/survey_data_July2022.RData")
+old_survey_data <- survey_data
+
+nonstn_data <- read_csv("../../Data/non_standardised_data_20230112.csv") %>% 
+  left_join(dplyr::select(old_survey_data, c(1,2,5)), by= "acc_no") 
+
+## Adding extra study modality
+nonstn_data$modality
+nonstn_data[c(13,14,16), "modality"] <- c("Proportion of fishers", 
+                                          "Self reporting", "Self reporting")
+
+## Fixing unicode study names
+nonstn_data[c(8:10,15),5] <- c("Gonzalez and de Larrinoa 2013",
+                                 "Gonzalez and de Larrinoa 2013",
+                                 "Guclusoy 2008",
+                                 "Sepulveda and Oliva 2005")
+
+nonstn_data[c(13,14,16),"study_name"] <- c("Mo et al. 2011", 
+                                           "Karamanlidis et al. 2020",
+                                           "Kauppinen et al. 2005")
+
+survey_summary <- nonstn_data %>% 
+  group_by(acc_no) %>% 
+  summarise(study_name = study_name[1],
+            interaction_prop = mean(x_int), 
+            damage_prop = mean(x_dmg),
+            modality = modality[1])
+
+##______________________________________________________________________________
+#### 2. Plot and summary statistics ####
+int_colour <- MetPalettes$Hokusai2[[1]][3]
+dmg_colour <- MetPalettes$Hokusai2[[1]][6]
+
+interaction_plot <- ggplot(survey_summary, aes(x = "", y = interaction_prop)) +
+  geom_violin(fill = int_colour, alpha = 0.2, 
+              colour = "white", show.legend = F) +
+  geom_point(aes(x = "", shape = modality), colour = int_colour, 
+             size = 6, alpha = 0.8, show.legend = F) +
+  coord_cartesian(ylim = c(0,1)) +
+  labs(x = "", y = "Interaction proportion", 
+       shape = "Data\nmodality", tag = "a)") +
+  theme_bw(base_size = 13) +
+  theme(panel.grid = element_blank())
+
+damage_plot <- ggplot(survey_summary, aes(x = "", y = damage_prop)) +
+  geom_violin(fill = dmg_colour, alpha = 0.2, 
+              colour = "white", show.legend = F) +
+  geom_point(aes(x = "", shape = modality), colour = dmg_colour, 
+             size = 6, alpha = 0.8) +
+  coord_cartesian(ylim = c(0,1)) +
+  labs(x = "", y = "Damage proportion", 
+       shape = "Data\nmodality", tag = "b)") +
+  guides(shape = guide_legend(keyheight = 2.5,
+                              override.aes = 
+                                list(colour = "black",
+                                     alpha = 1))) +
+  theme_bw(base_size = 13) +
+  theme(panel.grid = element_blank())
+
+summarise(survey_summary, 
+          mean_int = mean(interaction_prop, na.rm = T),
+          mean_dmg =  mean(damage_prop, na.rm = T))
+
+ggsave(interaction_plot + damage_plot, 
+       filename = "../../Figures/extraction_20230112/figS4.jpeg",
+       width = 22, height = 12, units = "cm", dpi = 1000)
+

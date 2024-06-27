@@ -1,0 +1,188 @@
+#####################################################
+##                                                 ##
+##   Pinniped Fisheries Interaction Meta-Analysis  ##
+##                                                 ##
+##             Wrangling Coordinates               ##
+##                                                 ##
+##              JJ- April 14th 2022                ##
+##                                                 ##
+#####################################################
+rm(list = ls())
+options(width = 100)
+
+## Change the .libPaths and R_LIBS_USER to the right thing if you're on a uni computer
+if(Sys.info()["nodename"] == "BIO-W-LT-000083" |
+   Sys.info()["nodename"] == "BIO-W-DT-02108") {
+  .libPaths("C:/Users/zool2541/R-4.1.1/library/")
+  .libPaths("!\\\\zoo-suitcase/home$/zool2541/My Documents/R/win-library/4.1")}
+
+library(tidyverse)
+library(MetBrewer)
+library(patchwork)
+library(sp)
+library(sf)
+library(raster)
+
+int_colour <- MetPalettes$Hokusai2[[1]][3]
+med_colour <- MetPalettes$Derain[[1]][7]
+dmg_colour <- MetPalettes$Hokusai2[[1]][6]
+
+##______________________________________________________________________________
+#### 1. Loading and wrangling ####
+
+## Interaction data
+pinnrev <- read_csv("../../Data/scoping_data_extraction_20220512.csv") %>% 
+  mutate(spp = paste0(genus, " ", species))
+
+glimpse(pinnrev)
+
+## Operational interaction data - non survey results with normalising constants
+op_interaction <- pinnrev %>% 
+  filter(method != "survey" &
+           is.na(norm_int) == FALSE) %>% 
+  mutate(interaction_prop = x_int,
+         interaction_trials = n_int*norm_int,
+         damage_prop = as.numeric(x_dmg),
+         damage_trials = as.numeric(n_dmg)*norm_int,
+         location = case_when(
+           fish_loc == "off" ~ "off_shore",
+           fish_loc == "near" ~ "near_shore",
+           TRUE ~ "both")) %>% 
+  # Adding in events
+  mutate(interaction_events = floor(interaction_prop*interaction_trials),
+         damage_events = floor(damage_prop*damage_trials)) %>% 
+  dplyr::select(acc_no, score, obs_no, author_type = auth_type,
+                country = country, prevention = prev, compensation = comp,
+                retaliation = retal, species = spp, pop_trend, fishery_type = fish_type,
+                gear_type = fish_gear, location, 
+                interaction_prop, interaction_events, interaction_trials,
+                damage_prop, damage_events, damage_trials)
+
+##______________________________________________________________________________
+#### 2. Coordinate wrangling ####
+
+pdat <- pinnrev %>% 
+  filter(method != "survey" &
+           is.na(norm_int) == FALSE) %>% 
+  slice(-c(7,39))
+
+## 2a. Northern Latitude
+lat_N <- pdat %>% pull(lat_N)
+
+lat_N_ds <- unlist(lapply(str_split(lat_N, pattern = " "), function(x){
+  if(length(x) < 3 | is.na(x)){lat_ds = NA}
+  else if(as.numeric(x[1]) < 0){
+    lat_ds = paste0(abs(as.numeric(x[1])), "d", x[2], "'", x[3], "\"S")
+    lat_ds = as.numeric(sp::char2dms(lat_ds))}
+  else{lat_ds = paste0(x[1], "d", x[2], "'", x[3], "\"N")
+       lat_ds = as.numeric(sp::char2dms(lat_ds))}
+  return(lat_ds)
+  }))
+
+## 2b. Southern Latitude
+lat_S <-  pdat %>% pull(lat_S)
+
+lat_S_ds <- unlist(lapply(str_split(lat_S, pattern = " "), function(x){
+  if(length(x) < 3 | is.na(x)){lat_ds = NA}
+  else if(as.numeric(x[1]) < 0){
+    lat_ds = paste0(abs(as.numeric(x[1])), "d", x[2], "'", x[3], "\"S")
+    lat_ds = as.numeric(sp::char2dms(lat_ds))}
+  else{lat_ds = paste0(x[1], "d", x[2], "'", x[3], "\"N")
+  lat_ds = as.numeric(sp::char2dms(lat_ds))}
+  return(lat_ds)
+}))
+
+## 2c. Western Longitude
+lon_W <- pdat %>% pull(long_W)
+
+lon_W_ds <- unlist(lapply(str_split(lon_W, pattern = " "), function(x){
+  if(length(x) < 3 | is.na(x)){lon_ds = NA}
+  else if(as.numeric(x[1]) < 0){
+    lon_ds = paste0(abs(as.numeric(x[1])), "d", x[2], "'", x[3], "\"W")
+    lon_ds = as.numeric(sp::char2dms(lon_ds))}
+  else{lon_ds = paste0(x[1], "d", x[2], "'", x[3], "\"E")
+  lon_ds = as.numeric(sp::char2dms(lon_ds))}
+  return(lon_ds)
+}))
+
+## 2d. Eastern Longitude
+lon_E <- pdat %>% pull(long_E)
+
+lon_E_ds <- unlist(lapply(str_split(lon_E, pattern = " "), function(x){
+  if(length(x) < 3 | is.na(x)){lon_ds = NA}
+  else if(as.numeric(x[1]) < 0){
+    lon_ds = paste0(abs(as.numeric(x[1])), "d", x[2], "'", x[3], "\"W")
+    lon_ds = as.numeric(sp::char2dms(lon_ds))}
+  else{lon_ds = paste0(x[1], "d", x[2], "'", x[3], "\"E")
+  lon_ds = as.numeric(sp::char2dms(lon_ds))}
+  return(lon_ds)
+}))
+
+##______________________________________________________________________________
+#### 3. Converting to spatial polygons ####
+
+# Going through each of the coordinates and turning them into spatial polygons
+spatial_poly_list <-lapply(X = 1:length(lat_N_ds), FUN = function(x){
+
+  # curent coordiantes
+  clon_W = lon_W_ds[x]
+  clon_E = lon_E_ds[x]
+  clat_N = lat_N_ds[x]
+  clat_S = lat_S_ds[x] 
+  
+  # if they are the same, make them super small
+  if(clon_W > clon_E){clon_E = clon_E + 0.05}
+  if(clat_S > clat_N){clat_N = clat_N + 0.05}
+  
+  # convert
+  cpoly = as(raster::extent(clon_W, clon_E, clat_S, clat_N), "SpatialPolygons")
+  proj4string(cpoly) <- "+proj=longlat +ellps=WGS84 +datum=WGS84 +no_defs"
+  cdat = pdat[x,c("acc_no","n_int","n_dmg", "norm_int")]
+  SpatialPolygonsDataFrame(cpoly, data = cdat)
+})
+
+# Binding all the data together to one spatial polygons dtaaframe
+pinnrev_spatial <- bind_rows(lapply(X = 1:length(spatial_poly_list), FUN = function(x){
+  sf::st_as_sf(spatial_poly_list[[x]])
+}))
+
+pinnrev_sf <- sf::st_as_sf(pinnrev_spatial)
+
+# Taking centroid points - having to add 16:18 and 21 separately
+pinnrev_centroids <- st_centroid(pinnrev_sf[-c(16:18,21),]) %>% 
+  mutate(n = if_else(is.na(n_int) == TRUE, as.numeric(n_dmg), n_int))
+
+point_studies <- pdat %>% 
+  slice(16:18,21) %>% 
+  mutate(lat = lat_N_ds[c(16:18,21)], lon = lon_E_ds[c(16:18,21)],
+         n = if_else(is.na(n_int) == TRUE, as.numeric(n_dmg), n_int)) %>% 
+  st_as_sf(coords = c("lon", "lat"), 
+           crs = "+proj=longlat +datum=WGS84 +no_defs +ellps=WGS84 +towgs84=0,0,0")
+##______________________________________________________________________________
+#### 4. Plots ####
+
+world_map <- st_read("../../Figures/Natural_Earth_Land_data/ne_10m_land.shp")
+
+# The CRS - Robin projection for curved edges
+myCRS <- CRS("+proj=robin +lon_0=0 +x_0=0 +y_0=0 +ellps=WGS84 +datum=WGS84 +units=m +no_defs")
+
+plots_world <- ggplot() +
+  geom_sf(data = world_map, fill = "lightgrey", colour = "lightgrey", size = 0.01) +
+  geom_sf(data = pinnrev_centroids, aes(size = n*norm_int), alpha = 0.8,
+          colour = med_colour) +
+  geom_sf(data = point_studies, aes(size = n*norm_int), 
+          alpha = 0.4, colour = med_colour) +
+  coord_sf(crs= myCRS) +
+  scale_size_continuous(trans = "log10", breaks = c(1,10,100,1000,5000),
+                        limits = c(1,5000), range = c(1,4)) +
+  guides(colour = guide_legend(override.aes = list(alpha = 1))) +
+  labs(size = "Days of\nObservation") +
+  theme_void()
+
+ggsave(plots_world, filename = "../../Figures/extraction_20220512/world_map_studies.pdf", 
+       width = 20, height = 14, units = "cm")
+
+
+
+
+
