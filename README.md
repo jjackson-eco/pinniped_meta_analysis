@@ -4,6 +4,8 @@
 #### 2024-06-27
 #### Repository created by John Jackson
 
+[![DOI](https://zenodo.org/badge/820920701.svg)](https://zenodo.org/doi/10.5281/zenodo.12579909)
+
 This repository accompanies the above titled publication, providing a fully reproducible analysis pipeline for all results presented. The archived version for continuity is found on Zenodo. You can find the paper [{insert DOI here when we receive it}](dsadasdas.com).
 
 This repository is split into four subrepositories, `data/`, `wrangling/`, `analysis/`, and `output/`, which are organised for the progression of the analyses. The main meta-analysis, which forms the majority of the results can be found in `analysis/meta_analysis_2024.R`. Full file descriptions are as follows.
