@@ -65,13 +65,14 @@ pinniped_conflict_studies <- ggplot() +
   scale_fill_gradient2(low = "grey99", mid = "grey91", 
                        high = "#7301A8FF") +
   scale_shape_manual(values = c(2,1)) +
-  guides(fill = guide_colorbar(barheight = 10, barwidth = 2)) +
+  guides(fill = guide_colorbar(barheight = 8, barwidth = 2)) +
   labs(fill = "Potential for\npinniped-fishery\ninteractions", shape = "Data type") +
-  theme_void() 
+  theme_void() +
+  theme(legend.margin = margin(0,0.2,0,0, "cm"))
 
 ggsave(pinniped_conflict_studies,
        filename = "output/figure_4.pdf",
-       width = 25, height = 20, units = "cm")
+       width = 25, height = 13, units = "cm")
 
 ##______________________________________________________________________________
 #### 4. Observed conflict vs. potential ####
