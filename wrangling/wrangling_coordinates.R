@@ -114,8 +114,6 @@ lon_E_ds <- unlist(lapply(str_split(lon_E, pattern = " "), function(x){
 # Going through each of the coordinates and turning them into spatial polygons
 spatial_poly_list <-lapply(X = 1:length(lat_N_ds), FUN = function(x){
   
-  print(x)
-
   # curent coordiantes
   clon_W = lon_W_ds[x]
   clon_E = lon_E_ds[x]
@@ -269,11 +267,11 @@ plots_world <- ggplot() +
                         limits = c(1,50000), range = c(1,6)) +
   scale_colour_manual(name = "Data\navailable",
                       breaks = c("Interaction", "Catch lost", "Both", "Non-standardised"),
-                      values = c(int_colour, dmg_colour, "black", "grey60")) +
+                      values = c(int_colour, dmg_colour, "#7301A8FF", "grey60")) +
   scale_y_continuous(expand = c(0,0)) + scale_x_continuous(expand = c(0,0)) +
   guides(colour = guide_legend(keyheight = 2.1,
                                override.aes = 
-                                 list(alpha = 1, size = 4, 
+                                 list(alpha = 1, size = 5, 
                                       shape = c(16, 16, 16, 17))),
          size = guide_legend(override.aes = list(alpha = 1))) +
   labs(size = "Days of\nObservation") +
